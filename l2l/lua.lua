@@ -1,0 +1,376 @@
+local itertools = require("l2l.itertools")
+local reader = require("l2l.reader3")
+local exception = require("l2l.exception2")
+local show = itertools.show
+local list = itertools.list
+local car = itertools.car
+local cdr = itertools.cdr
+local cons = itertools.cons
+local take = itertools.take
+local drop = itertools.drop
+local tolist = itertools.tolist
+local map = itertools.map
+
+local raise = exception.raise
+
+local execute = reader.execute
+local read_whitespace = reader.read_whitespace
+
+local ExpectedNonTerminal =
+  exception.Exception("Expected %s")
+
+
+local function NonTerminal(name)
+  -- Consists of one or more of the same type
+  local non_terminal = setmetatable({
+    representation = function(self)
+      local origin = list(self.read)
+      local last = origin
+      for i, value in ipairs(self) do
+        last[2] = cons(value:representation())
+        last = last[2]
+      end
+      return origin
+    end,
+    __tostring = function(self)
+      local repr = {}
+      for i, value in ipairs(self) do
+          table.insert(repr, itertools.show(value))
+      end
+      table.insert(repr, "")
+      return table.concat(repr, "")
+    end,
+    __eq = function(self, other)
+      return getmetatable(self) == getmetatable(other) and
+        tostring(self) == tostring(other)
+    end
+  }, {__call = function(non_terminal, ...)
+      return setmetatable({name=name, is_terminal=false, ...}, non_terminal)
+    end,
+    __tostring = function(self)
+      return name
+    end})
+
+  non_terminal.__index = non_terminal
+  return non_terminal
+end
+
+-- Consists of one or more of the same type
+local Terminal = setmetatable({
+  representation = function(self)
+    return show(self)
+  end,
+  __tostring = function(self)
+    return tostring(self[1])
+  end,
+  __eq = function(self, other)
+    return getmetatable(self) == getmetatable(other) and
+      tostring(self) == tostring(other)
+  end
+}, {__call = function(Terminal, value)
+    return setmetatable({value, is_terminal=true}, Terminal)
+  end})
+
+Terminal.__index = Terminal
+
+local SKIP = "SKIP"
+local OPT = "OPT"
+local REPEAT = "REPEAT"
+
+local READ
+
+local function is(reader, flag)
+  if getmetatable(reader) ~= READ then
+    return false
+  end
+  return reader[flag]
+end
+
+READ = setmetatable({
+  representation = function(self)
+    return tostring(self)
+  end,
+  __call = function(self, environment, bytes)
+    return car(self)(environment, bytes)
+  end,
+  __tostring = function(self)
+    local text = tostring(car(self))
+    if is(self, OPT) then
+      text = "["..text.."]"
+    end
+    if is(self, REPEAT) then
+      text = "{"..text.."}"
+    end
+    if is(self, SKIP) then
+      text = ""
+    end
+    return text
+  end
+}, {
+  __call = function(READ, reader, ...)
+    local self = setmetatable({reader}, READ)
+    for i, value in ipairs({...}) do
+      self[value] = true
+    end
+    return self
+  end
+})
+
+READ.__index = READ
+
+local SET = setmetatable({
+  __call = function(self, environment, bytes)
+    local values, rest = car(self)(environment, bytes)
+    return map(function(value)
+        if type(value) ~= "table" and not value.representation then
+          value = Terminal(value)
+        end
+        return value
+      end, values), rest
+  end,
+  __tostring = function(self)
+    return tostring(self.target)
+  end
+}, {
+  __call = function(SET, target, reader, ...)
+    local self = setmetatable({reader, target=target}, SET)
+    target.read = self
+    return self
+  end
+})
+SET.__index = SET
+
+local ANY = setmetatable({
+  __call = function(self, environment, bytes)
+    for i, reader in ipairs(self) do
+      assert(not is(reader, OPT))
+      assert(not is(reader, SKIP))
+      assert(not is(reader, REPEAT))
+      assert(reader)
+      local ok, values, rest = pcall(execute, reader, environment, bytes)
+      if ok and values and rest ~= bytes then
+        return values, rest
+      end
+    end
+    return nil, bytes
+  end,
+  __tostring = function(self)
+    local repr = {"ANY("}
+    for i, value in ipairs(self) do
+        table.insert(repr, itertools.show(value))
+        if i ~= #self then
+          table.insert(repr, ",")
+        end
+    end
+    table.insert(repr, ")")
+    return table.concat(repr, "")
+  end
+}, {
+  __call = function(ANY, ...)
+    return setmetatable({...}, ANY)
+  end
+})
+
+
+local ALL = setmetatable({
+  __call = function(self, environment, bytes)
+    local values, rest, all, ok = nil, bytes, {}
+    for i, reader in ipairs(self) do
+       while true do
+        assert(reader)
+        if is(reader, OPT) or is(reader, REPEAT) then
+          local prev = rest
+          ok, values, rest = pcall(execute, reader, environment, rest)
+          if not ok then
+            rest = prev -- restore to previous point.
+            if getmetatable(values) == ExpectedNonTerminal then
+              break
+            else
+              raise(values)
+            end
+          end
+        else
+          values, rest = execute(reader, environment, rest)
+        end
+        if not values then
+          if is(reader, REPEAT) then
+            break
+          elseif not is(reader, OPT) and not is(reader, SKIP) then
+            return nil, bytes
+          end
+        end
+        if not is(reader, SKIP) then
+          for j, value in ipairs(values or {}) do
+            table.insert(all, value)
+          end
+        end
+        if not is(reader, REPEAT) then
+          break
+        end
+      end
+    end
+    return tolist(all), rest
+  end,
+  __tostring = function(self)
+    local repr = {"ALL("}
+    for i, value in ipairs(self) do
+        table.insert(repr, itertools.show(value))
+        if i ~= #self then
+          table.insert(repr, ",")
+        end
+    end
+    table.insert(repr, ")")
+    return table.concat(repr, "")
+  end
+}, {
+  __call = function(ALL, ...)
+    return setmetatable({...}, ALL)
+  end
+})
+
+local function read_terminal(terminal)
+  local value = tostring(terminal)
+  local reader = SET(terminal, function(environment, bytes)
+    if list.concat(take(#value, bytes)) == value then
+      return list(terminal), drop(#value, bytes)
+    end
+    return nil, bytes
+  end)
+  return reader
+end
+
+local function read_nonterminal(nonterminal, origin)
+  assert(origin, "missing `origin` argument")
+  local reader = SET(nonterminal, function(environment, bytes)
+    local values, rest = execute(origin, environment, bytes)
+    if #({list.unpack(values)}) == 0 then
+      raise(ExpectedNonTerminal(environment, bytes, origin))
+    end
+    return list(nonterminal(list.unpack(values))), rest
+  end)
+  return reader
+end
+
+-- Lua Grammar
+-- chunk ::= block
+-- block ::= {stat} [retstat]
+-- stat ::=  ‘;’ | 
+--      varlist ‘=’ explist | 
+--      functioncall | 
+--      label | 
+--      break | 
+--      goto Name | 
+--      do block end | 
+--      while exp do block end | 
+--      repeat block until exp | 
+--      if exp then block {elseif exp then block} [else block] end | 
+--      for Name ‘=’ exp ‘,’ exp [‘,’ exp] do block end | 
+--      for namelist in explist do block end | 
+--      function funcname funcbody | 
+--      local function Name funcbody | 
+--      local namelist [‘=’ explist] 
+
+-- retstat ::= return [explist] [‘;’]
+-- label ::= ‘::’ Name ‘::’
+-- funcname ::= Name {‘.’ Name} [‘:’ Name]
+-- varlist ::= var {‘,’ var}
+-- var ::=  Name | prefixexp ‘[’ exp ‘]’ | prefixexp ‘.’ Name 
+-- namelist ::= Name {‘,’ Name}
+-- explist ::= exp {‘,’ exp}
+-- exp ::=  nil | false | true | Numeral | LiteralString | ‘...’ | functiondef | 
+--      prefixexp | tableconstructor | exp binop exp | unop exp 
+-- prefixexp ::= var | functioncall | ‘(’ exp ‘)’
+-- functioncall ::=  prefixexp args | prefixexp ‘:’ Name args 
+-- args ::=  ‘(’ [explist] ‘)’ | tableconstructor | LiteralString 
+-- functiondef ::= function funcbody
+-- funcbody ::= ‘(’ [parlist] ‘)’ block end
+-- parlist ::= namelist [‘,’ ‘...’] | ‘...’
+-- tableconstructor ::= ‘{’ [fieldlist] ‘}’
+-- fieldlist ::= field {fieldsep field} [fieldsep]
+-- field ::= ‘[’ exp ‘]’ ‘=’ exp | Name ‘=’ exp | exp
+-- fieldsep ::= ‘,’ | ‘;’
+-- binop ::=  ‘+’ | ‘-’ | ‘*’ | ‘/’ | ‘//’ | ‘^’ | ‘%’ | 
+--      ‘&’ | ‘~’ | ‘|’ | ‘>>’ | ‘<<’ | ‘..’ | 
+--      ‘<’ | ‘<=’ | ‘>’ | ‘>=’ | ‘==’ | ‘~=’ | 
+--      and | or
+-- unop ::= ‘-’ | not | ‘#’ | ‘~’
+
+unop = Terminal('-')
+_elseif = Terminal('elseif')
+_if = Terminal('if')
+_return = Terminal('return')
+semicolon = Terminal(";")
+
+Name = NonTerminal("Name", "[%w_][%w%d_]?")
+label = NonTerminal("label")
+funcname = NonTerminal("funcname")
+varlist = NonTerminal("varlist")
+exp = NonTerminal("exp")
+stat = NonTerminal("stat")
+block = NonTerminal("block")
+retstat = NonTerminal("retstat")
+whitespace = NonTerminal("whitespace")
+
+
+--[[
+Names (also called identifiers) in Lua can be any string of letters, digits, and
+underscores, not beginning with a digit and not being a reserved word. 
+Identifiers are used to name variables, table fields, and labels.
+]]--
+
+local read_semicolon = read_terminal(semicolon)
+local read_return = read_terminal(_return)
+local read_label = read_nonterminal(NonTerminal("label"),
+  ALL(
+    read_terminal(Terminal('::')),
+    read_Name,
+    read_terminal(Terminal('::'))
+  ))
+
+-- local function read_Name(environment, bytes)
+
+-- end
+
+-- read_stat = read_nonterminal(
+--   ANY(
+--     read_semicolon,
+--     ALL(read_varlist, read_equals, read_explist),
+--     read_functioncall,
+--     read_label,
+--     read_break,
+--     ALL(read_goto, read_Name),
+--     ALL(read_do, read_block, read_end)
+-- )
+
+read_whitespace = SET(whitespace, read_whitespace)
+
+local read_stat = read_nonterminal(stat,
+  ANY(
+    READ(read_semicolon),
+    READ(read_label)))
+
+local read_retstat = read_nonterminal(retstat,
+  ALL(
+    read_return,
+    READ(read_whitespace, SKIP, OPT),
+    READ(read_semicolon, OPT)))
+
+local read_block = read_nonterminal(block,
+  ALL(
+    READ(read_whitespace, SKIP, OPT),
+    READ(read_stat, REPEAT),
+    READ(read_whitespace, SKIP, OPT),
+    READ(read_retstat, OPT)
+  ))
+
+--- Return the default _R table.
+local function block_R()
+  return {
+    -- put block level stuff here? or in read_block's own _R
+    list(read_block)
+  }
+end
+
+return {
+    block_R = block_R
+}
