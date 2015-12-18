@@ -36,11 +36,18 @@ symbol.__index = symbol
 
 
 --- Returns a function that returns whether it's argument `text` matches
--- against `pattern`.
+-- against any pattern in `...`.
 -- @params pattern the lua pattern
-local function match(pattern)
+local function match(...)
+  local patterns = {...}
   return function(text)
-    return text:match(pattern)
+    assert(type(text) == "string")
+    for i, pattern in ipairs(patterns) do
+      local matches = text:match(pattern)
+      if matches then
+        return matches
+      end
+    end
   end
 end
 
@@ -159,7 +166,6 @@ local function read_predicate(environment, transform, predicate, bytes)
       end, scan(operator[".."], "", bytes), bytes))
   tokens = map(car, tokens)
   rest = map(cdr, rest)
-
   local value = (transform or id)(last(tokens))
   return tolist({value}), rest
 end
@@ -189,6 +195,11 @@ local function read_number(environment, bytes)
   end
   local number = car(numbers)
   return list(negative and -number or number), rest
+end
+
+local function read_quote(environment, bytes)
+  local values, rest = read(environment, cdr(bytes))
+  return list(cons(symbol('quote'), values)), rest
 end
 
 local function read_right_paren(environment, bytes)
@@ -267,7 +278,7 @@ function default_R()
     -- ['#'] = read_dispatch_macro,
     -- ['`'] = read_quasiquote,
     -- [','] = read_quasiquote_eval,
-    -- ["'"] = read_quote,
+    ["'"] = list(read_quote),
 
     ["-"]=list(read_number, read_symbol),
 
@@ -289,7 +300,10 @@ function default_R()
 end
 
 if debug.getinfo(3) == nil then
-  local values, rest = read(nil, tolist([[(print ($ ;   return   ;   ))]]))
+  local values, rest = read(nil, tolist([[
+    (print
+      ($ while(nil)do return(nil);end)
+    )]]))
   print(values, rest)
   for i, value in ipairs(cdr(car(values))) do
     print(show(value:representation()))
@@ -306,6 +320,8 @@ return {
   default_R = default_R,
   skip_whitespace = skip_whitespace,
   read_whitespace = read_whitespace,
-  execute = execute
+  execute = execute,
+  read_predicate = read_predicate,
+  match=match
 }
 

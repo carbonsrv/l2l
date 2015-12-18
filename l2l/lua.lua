@@ -14,7 +14,8 @@ local map = itertools.map
 local raise = exception.raise
 
 local execute = reader.execute
-local read_whitespace = reader.read_whitespace
+local read_predicate = reader.read_predicate
+local match = reader.match
 
 local ExpectedNonTerminal =
   exception.Exception("Expected %s")
@@ -133,6 +134,7 @@ local SET = setmetatable({
   end
 }, {
   __call = function(SET, target, reader, ...)
+    assert(target)
     local self = setmetatable({reader, target=target}, SET)
     target.read = self
     return self
@@ -150,6 +152,9 @@ local ANY = setmetatable({
       local ok, values, rest = pcall(execute, reader, environment, bytes)
       if ok and values and rest ~= bytes then
         return values, rest
+      end
+      if not ok and getmetatable(values) ~= ExpectedNonTerminal then
+        raise(values)
       end
     end
     return nil, bytes
@@ -195,7 +200,7 @@ local ALL = setmetatable({
         if not values then
           if is(reader, REPEAT) then
             break
-          elseif not is(reader, OPT) and not is(reader, SKIP) then
+          elseif not is(reader, OPT) then
             return nil, bytes
           end
         end
@@ -239,9 +244,10 @@ local function read_terminal(terminal)
   return reader
 end
 
-local function read_nonterminal(nonterminal, origin)
-  assert(origin, "missing `origin` argument")
+local function read_nonterminal(nonterminal, factory)
+  assert(factory, "missing `origin` argument")
   local reader = SET(nonterminal, function(environment, bytes)
+    local origin = factory()
     local values, rest = execute(origin, environment, bytes)
     if #({list.unpack(values)}) == 0 then
       raise(ExpectedNonTerminal(environment, bytes, origin))
@@ -249,6 +255,10 @@ local function read_nonterminal(nonterminal, origin)
     return list(nonterminal(list.unpack(values))), rest
   end)
   return reader
+end
+
+local function TERM(text)
+  return read_terminal(Terminal(text))
 end
 
 -- Lua Grammar
@@ -300,8 +310,9 @@ _elseif = Terminal('elseif')
 _if = Terminal('if')
 _return = Terminal('return')
 semicolon = Terminal(";")
+coloncolon = Terminal('::')
 
-Name = NonTerminal("Name", "[%w_][%w%d_]?")
+Name = NonTerminal("Name")
 label = NonTerminal("label")
 funcname = NonTerminal("funcname")
 varlist = NonTerminal("varlist")
@@ -310,26 +321,141 @@ stat = NonTerminal("stat")
 block = NonTerminal("block")
 retstat = NonTerminal("retstat")
 whitespace = NonTerminal("whitespace")
-
-
---[[
-Names (also called identifiers) in Lua can be any string of letters, digits, and
-underscores, not beginning with a digit and not being a reserved word. 
-Identifiers are used to name variables, table fields, and labels.
-]]--
+_goto = NonTerminal("goto")
+_while = NonTerminal("while")
+exp = NonTerminal("exp")
+prefixexp = NonTerminal("prefixexp")
 
 local read_semicolon = read_terminal(semicolon)
+local read_coloncolon = read_terminal(coloncolon)
 local read_return = read_terminal(_return)
+
+local operator = require("l2l.operator")
+local scan = itertools.scan
+local span = itertools.span
+local last = itertools.last
+local id = itertools.id
+local match = reader.match
+
+
+local read_whitespace = SET(whitespace, function(environment, bytes)
+-- * Mandatory read_whitespace after keywords should not be "SKIP"ed.
+--   Otherwise when output the code could produce like "gotolabel",
+--   which is not valid.
+-- * In "ALL", read_whitespace prepend content elements that can have
+--   whitespaces prepending it.
+-- * At the end of "ALL", there should be a read_whitespace appending the list
+--   if the nonterminal in question can be appended with whitespace.
+-- * That should take care of whitespace before and after each element. Avoid 
+--   read_whitespace elsewhere.
+  local patterns = {}
+  local bounds = {
+    ["("]=true, 
+    [","]=true,
+    [";"]=true,
+  }
+  for byte, _ in pairs(bounds) do
+    table.insert(patterns, "^%"..byte.."()$")
+  end
+
+  local values, rest = read_predicate(environment, id,
+    match("^%s+$", unpack(patterns)), bytes)
+
+  -- Convert boundary characters into zero string tokens.
+  if values and bounds[car(values)] then
+    return list(""), bytes
+  end
+  return values, rest
+end)
+
+local read_Name  = SET(Name, function(environment, bytes)
+  -- Names (also called identifiers) in Lua can be any string of letters,
+  -- digits, and underscores, not beginning with a digit and not being a
+  -- reserved word. Identifiers are used to name variables, table fields, and
+  -- labels.
+  return read_predicate(environment,
+    tostring, function(token, byte)
+      return (token..byte):match("^[%w_][%w%d_]*$")
+    end, bytes)
+end)
+
 local read_label = read_nonterminal(NonTerminal("label"),
-  ALL(
-    read_terminal(Terminal('::')),
-    read_Name,
-    read_terminal(Terminal('::'))
-  ))
+  -- label ::= ‘::’ Name ‘::’
+  function() return ALL(
+    TERM('::'),
+    READ(read_whitespace, SKIP, OPT),
+    READ(read_Name),
+    READ(read_whitespace, SKIP, OPT),
+    TERM('::')
+  ) end)
 
--- local function read_Name(environment, bytes)
+local read_goto = read_nonterminal(_goto,
+  -- goto Name
+  function() return ALL(
+    TERM('goto'),
+    READ(read_whitespace),
+    read_Name
+  ) end)
 
--- end
+local read_exp
+local read_prefixexp = read_nonterminal(prefixexp,
+  -- prefixexp ::= var | functioncall | ‘(’ exp ‘)’
+  function() return ALL(
+    TERM("("),
+    READ(read_whitespace, SKIP, OPT),
+    read_exp,
+    TERM(")"),
+    READ(read_whitespace, SKIP, OPT)
+  ) end)
+
+read_exp = read_nonterminal(exp,
+  -- exp ::=  nil | false | true | Numeral | LiteralString | ‘...’ |  
+  --      functiondef | prefixexp | tableconstructor | exp binop exp | unop exp 
+  function() return ALL(
+    ANY(
+      TERM("nil"),
+      READ(read_prefixexp)
+    ),
+    READ(read_whitespace, SKIP, OPT)
+  ) end)
+
+local read_block
+local read_while = read_nonterminal(_while,
+  -- while exp do block end
+  function() return ALL(
+    TERM("while"),
+    READ(read_whitespace, SKIP),
+    READ(read_exp),
+    TERM("do"),
+    READ(read_whitespace), -- required to prevent "doreturn"
+    READ(read_block, OPT),
+    TERM("end")
+  ) end)
+
+local read_stat = read_nonterminal(stat,
+  -- stat ::=  ‘;’ | 
+  --      varlist ‘=’ explist | 
+  --      functioncall | 
+  --      label | 
+  --      break | 
+  --      goto Name | 
+  --      do block end | 
+  --      while exp do block end | 
+  --      repeat block until exp | 
+  --      if exp then block {elseif exp then block} [else block] end | 
+  --      for Name ‘=’ exp ‘,’ exp [‘,’ exp] do block end | 
+  --      for namelist in explist do block end | 
+  --      function funcname funcbody | 
+  --      local function Name funcbody | 
+  --      local namelist [‘=’ explist] 
+  function() return ANY(
+    TERM(';'),
+    read_label,
+    TERM('break'),
+    read_goto,
+    read_while
+  ) end)
+
 
 -- read_stat = read_nonterminal(
 --   ANY(
@@ -342,26 +468,21 @@ local read_label = read_nonterminal(NonTerminal("label"),
 --     ALL(read_do, read_block, read_end)
 -- )
 
-read_whitespace = SET(whitespace, read_whitespace)
-
-local read_stat = read_nonterminal(stat,
-  ANY(
-    READ(read_semicolon),
-    READ(read_label)))
-
 local read_retstat = read_nonterminal(retstat,
-  ALL(
+  function() return ALL(
     read_return,
-    READ(read_whitespace, SKIP, OPT),
-    READ(read_semicolon, OPT)))
+    READ(read_whitespace, SKIP),
+    READ(read_exp, OPT), --should be explist
+    READ(read_semicolon, OPT)
+  ) end)
 
-local read_block = read_nonterminal(block,
-  ALL(
+read_block = read_nonterminal(block,
+  function() return ALL(
     READ(read_whitespace, SKIP, OPT),
     READ(read_stat, REPEAT),
     READ(read_whitespace, SKIP, OPT),
     READ(read_retstat, OPT)
-  ))
+  ) end)
 
 --- Return the default _R table.
 local function block_R()
