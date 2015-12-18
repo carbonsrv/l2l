@@ -195,7 +195,7 @@ local function read_predicate(environment, transform, predicate, bytes)
   return list(transform(token)), bytes
 end
 
---[[
+--[[--
 -- Slow
 local function read_predicate(environment, transform, predicate, bytes)
   local tokens, rest = span(car,
@@ -207,7 +207,7 @@ local function read_predicate(environment, transform, predicate, bytes)
   local value = (transform or id)(last(tokens))
   return tolist({value}), rest
 end
-]]--
+--]]--
 
 local function read_symbol(environment, bytes)
   -- Any byte that is not defined as a read macro can be part of a symbol.
@@ -349,12 +349,13 @@ if debug.getinfo(3) == nil then
   ]]--
   local values, rest = read(nil, tolist([[
     (print
-      ($ return (b))
+      ($ return)
     )]]))
   -- ($ while(nil)do return(nil),nil end)
   print(values, rest)
   for i, value in ipairs(cdr(car(values))) do
     -- print(value:is_valid())
+    print(show(value))
     print(show(value:representation()))
   end
 end

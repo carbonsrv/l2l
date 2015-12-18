@@ -31,7 +31,8 @@ local function NonTerminal(name)
       local origin = list(self.read)
       local last = origin
       for i, value in ipairs(self) do
-        last[2] = cons(value:representation())
+        local repr = type(value) == "string" and value or value:representation()
+        last[2] = cons(repr)
         last = last[2]
       end
       return origin
@@ -42,7 +43,7 @@ local function NonTerminal(name)
     __tostring = function(self)
       local repr = {}
       for i, value in ipairs(self) do
-          table.insert(repr, itertools.show(value))
+          table.insert(repr, tostring(value))
       end
       table.insert(repr, "")
       return table.concat(repr, "")
@@ -68,7 +69,7 @@ end
 -- Consists of one or more of the same type
 local Terminal = setmetatable({
   representation = function(self)
-    return show(self)
+    return self
   end,
   is_valid = function(self)
     return pcall(execute, self.read, nil, tolist(tostring(self)))
@@ -275,7 +276,9 @@ local function read_nonterminal(nonterminal, factory, const)
     if not origin or not const then
       origin = factory(environment, bytes, is_looping)
     end
-    is_called[bytes] = true
+    if bytes then
+      is_called[bytes] = true
+    end
     local ok, values, rest = pcall(execute, origin, environment, bytes)
     is_called = {}
     if not ok then
@@ -359,6 +362,7 @@ local keywords ={
   ["while"] = true
 }
 
+
 _elseif = Terminal("elseif")
 _if = Terminal("if")
 
@@ -413,16 +417,21 @@ local read_whitespace = SET(whitespace, function(environment, bytes)
     [","]=true,
     [";"]=true,
   }
+
+  if not bytes then
+    return list(whitespace("")), bytes
+  end
+
   for byte, _ in pairs(bounds) do
     table.insert(patterns, "^%"..byte.."$")
   end
 
-  local values, rest = read_predicate(environment, id,
+  local values, rest = read_predicate(environment, whitespace,
     match("^%s+$", unpack(patterns)), bytes)
 
   -- Convert boundary characters into zero string tokens.
-  if values and bounds[car(values)] then
-    return list(""), bytes
+  if values and bounds[tostring(car(values))] then
+    return list(whitespace("")), bytes
   end
   return values, rest
 end)
@@ -433,10 +442,10 @@ local read_Name  = SET(Name, function(environment, bytes)
   -- reserved word. Identifiers are used to name variables, table fields, and
   -- labels.
   local values, rest = read_predicate(environment,
-    tostring, function(token, byte)
+    Name, function(token, byte)
       return (token..byte):match("^[%w_][%w%d_]*$")
     end, bytes)
-  if values and car(values) and keywords[car(values)] then
+  if values and car(values) and keywords[tostring(car(values))] then
     return nil, bytes
   end
   return values, rest
@@ -509,6 +518,8 @@ read_prefixexp = read_nonterminal(prefixexp,
   function(environment, bytes, is_looping)
     return ANY(
       not is_looping and ALL(
+        -- Give the Parser a hint to avoid infinite loop on Left-recursion.
+        -- When it comes down to it `var` can only begin with a Name or "(".
         READ(ANY(read_Name, TERM("(")), PEEK),
         read_var),
       ALL(
@@ -533,7 +544,7 @@ read_var = read_nonterminal(var,
     end
     return ANY(
       ALL(
-        -- ANY cuts out at read_Name for a.b, if we don't have this clause. 
+        -- ANY cuts out at read_Name for a.b, if we don't have this. 
         read_Name,
         READ(read_whitespace, SKIP, OPT),
         TERM("."),
@@ -628,7 +639,7 @@ local read_retstat = read_nonterminal(retstat,
     READ(read_whitespace),
     READ(read_explist, OPT), --should be explist
     READ(TERM(";"), OPT),
-    READ(read_whitespace, SKIP, OPT)
+    READ(read_whitespace, OPT)
   ) end, true)
 
 read_block = read_nonterminal(block,
@@ -648,6 +659,7 @@ local function block_R()
   }
 end
 
+print(car(execute(read_block, nil, tolist("while not true do return a, b end"))))
 return {
     block_R = block_R
 }
