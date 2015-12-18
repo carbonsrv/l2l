@@ -236,11 +236,10 @@ local function map(f, ...)
 
   local origin = pair({nil})
   local last = origin
-
+  local index = 0
   while true do
     local parameters = {}
     local do_break = false
-    local index = 0
     for i=1, count do
       local _index, value = iterators[i](select(i, ...) or {}, index)
       if not _index then

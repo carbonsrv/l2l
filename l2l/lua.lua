@@ -14,7 +14,9 @@ local map = itertools.map
 local raise = exception.raise
 
 local execute = reader.execute
+
 local read_predicate = reader.read_predicate
+local read_number = reader.read_number
 local match = reader.match
 
 local ExpectedNonTerminal =
@@ -33,6 +35,9 @@ local function NonTerminal(name)
       end
       return origin
     end,
+    is_valid = function(self)
+      return pcall(execute, self.read, nil, tolist(tostring(self)))
+    end,
     __tostring = function(self)
       local repr = {}
       for i, value in ipairs(self) do
@@ -46,7 +51,10 @@ local function NonTerminal(name)
         tostring(self) == tostring(other)
     end
   }, {__call = function(non_terminal, ...)
-      return setmetatable({name=name, is_terminal=false, ...}, non_terminal)
+      return setmetatable({
+        name=name,
+        is_terminal=false,
+        ...}, non_terminal)
     end,
     __tostring = function(self)
       return name
@@ -61,6 +69,9 @@ local Terminal = setmetatable({
   representation = function(self)
     return show(self)
   end,
+  is_valid = function(self)
+    return pcall(execute, self.read, nil, tolist(tostring(self)))
+  end,
   __tostring = function(self)
     return tostring(self[1])
   end,
@@ -69,12 +80,15 @@ local Terminal = setmetatable({
       tostring(self) == tostring(other)
   end
 }, {__call = function(Terminal, value)
-    return setmetatable({value, is_terminal=true}, Terminal)
+    return setmetatable({
+      value,
+      is_terminal=true}, Terminal)
   end})
 
 Terminal.__index = Terminal
 
 local SKIP = "SKIP"
+local PEEK = "PEEK"
 local OPT = "OPT"
 local REPEAT = "REPEAT"
 
@@ -183,8 +197,8 @@ local ALL = setmetatable({
     for i, reader in ipairs(self) do
        while true do
         assert(reader)
+        local prev = rest
         if is(reader, OPT) or is(reader, REPEAT) then
-          local prev = rest
           ok, values, rest = pcall(execute, reader, environment, rest)
           if not ok then
             rest = prev -- restore to previous point.
@@ -204,11 +218,15 @@ local ALL = setmetatable({
             return nil, bytes
           end
         end
-        if not is(reader, SKIP) then
+        if is(reader, PEEK) then
+          -- print(reader, prev, rest)
+          rest = prev
+        elseif not is(reader, SKIP) then
           for j, value in ipairs(values or {}) do
             table.insert(all, value)
           end
         end
+
         if not is(reader, REPEAT) then
           break
         end
@@ -246,8 +264,10 @@ end
 
 local function read_nonterminal(nonterminal, factory)
   assert(factory, "missing `origin` argument")
+  local origin
   local reader = SET(nonterminal, function(environment, bytes)
-    local origin = factory()
+    origin = origin or factory(environment, bytes)
+    -- print(nonterminal, origin, bytes)
     local values, rest = execute(origin, environment, bytes)
     if #({list.unpack(values)}) == 0 then
       raise(ExpectedNonTerminal(environment, bytes, origin))
@@ -305,12 +325,30 @@ end
 --      and | or
 -- unop ::= ‘-’ | not | ‘#’ | ‘~’
 
-unop = Terminal('-')
-_elseif = Terminal('elseif')
-_if = Terminal('if')
-_return = Terminal('return')
-semicolon = Terminal(";")
-coloncolon = Terminal('::')
+
+local keywords ={
+  ["and"] = true, 
+  ["break"] = true, 
+  ["do"] = true, 
+  ["else"] = true, 
+  ["elseif"] = true, 
+  ["end"] = true,
+  ["for"] = true, 
+  ["function"] = true, 
+  ["if"] = true, 
+  ["in"] = true, 
+  ["local"] = true, 
+  ["not"] = true, 
+  ["or"] = true, 
+  ["repeat"] = true, 
+  ["return"] = true, 
+  ["then"] = true, 
+  ["until"] = true, 
+  ["while"] = true
+}
+
+_elseif = Terminal("elseif")
+_if = Terminal("if")
 
 Name = NonTerminal("Name")
 label = NonTerminal("label")
@@ -326,10 +364,20 @@ _while = NonTerminal("while")
 exp = NonTerminal("exp")
 prefixexp = NonTerminal("prefixexp")
 explist = NonTerminal("explist")
+unop = NonTerminal("unop")
+label = NonTerminal("label")
+number = NonTerminal("number")
+varlist = NonTerminal("varlist")
+var = NonTerminal("var")
 
-local read_semicolon = read_terminal(semicolon)
-local read_coloncolon = read_terminal(coloncolon)
-local read_return = read_terminal(_return)
+read_number = SET(number, function(environment, bytes)
+  local values, rest = reader.read_number(environment, bytes)
+  if values then
+    return list(Terminal(car(values))), rest
+  end
+  return nil, bytes
+end)
+
 
 local operator = require("l2l.operator")
 local scan = itertools.scan
@@ -338,25 +386,23 @@ local last = itertools.last
 local id = itertools.id
 local match = reader.match
 
-
 local read_whitespace = SET(whitespace, function(environment, bytes)
 -- * Mandatory read_whitespace after keywords should not be "SKIP"ed.
 --   Otherwise when output the code could produce like "gotolabel",
 --   which is not valid.
 -- * In "ALL", read_whitespace prepend content elements that can have
 --   whitespaces prepending it.
--- * At the end of "ALL", there should be a read_whitespace appending the list
---   if the nonterminal in question can be appended with whitespace.
--- * That should take care of whitespace before and after each element. Avoid 
---   read_whitespace elsewhere.
   local patterns = {}
   local bounds = {
-    ["("]=true, 
+    ["("]=true,
+    [")"]=true,
+    ["{"]=true,
+    ["}"]=true,
     [","]=true,
     [";"]=true,
   }
   for byte, _ in pairs(bounds) do
-    table.insert(patterns, "^%"..byte.."()$")
+    table.insert(patterns, "^%"..byte.."$")
   end
 
   local values, rest = read_predicate(environment, id,
@@ -374,39 +420,59 @@ local read_Name  = SET(Name, function(environment, bytes)
   -- digits, and underscores, not beginning with a digit and not being a
   -- reserved word. Identifiers are used to name variables, table fields, and
   -- labels.
-  return read_predicate(environment,
+  local values, rest = read_predicate(environment,
     tostring, function(token, byte)
       return (token..byte):match("^[%w_][%w%d_]*$")
     end, bytes)
+  if values and car(values) and keywords[car(values)] then
+    return nil, bytes
+  end
+  return values, rest
 end)
 
-local read_label = read_nonterminal(NonTerminal("label"),
+local read_unop = read_nonterminal(unop,
+  -- unop ::= ‘-’ | not | ‘#’ | ‘~’
+  function() return ANY(
+    TERM("-"),
+    ALL(TERM("not"), read_whitespace),
+    TERM("#"),
+    TERM("~")
+  ) end)
+
+local read_label = read_nonterminal(label,
   -- label ::= ‘::’ Name ‘::’
   function() return ALL(
-    TERM('::'),
+    TERM("::"),
     READ(read_whitespace, SKIP, OPT),
     READ(read_Name),
     READ(read_whitespace, SKIP, OPT),
-    TERM('::')
+    TERM("::")
   ) end)
 
 local read_goto = read_nonterminal(_goto,
   -- goto Name
   function() return ALL(
-    TERM('goto'),
+    TERM("goto"),
     READ(read_whitespace),
     read_Name
   ) end)
 
 local read_exp
+local read_var
 local read_prefixexp = read_nonterminal(prefixexp,
   -- prefixexp ::= var | functioncall | ‘(’ exp ‘)’
-  function() return ALL(
-    TERM("("),
-    READ(read_whitespace, SKIP, OPT),
-    read_exp,
-    TERM(")"),
-    READ(read_whitespace, SKIP, OPT)
+  function() return ANY(
+    ALL(
+      TERM("("),
+      READ(read_whitespace, SKIP, OPT),
+      read_exp,
+      READ(read_whitespace, SKIP, OPT),
+      TERM(")"),
+      READ(read_whitespace, SKIP, OPT)
+    ),
+    ALL(
+      READ(ANY(read_Name, TERM("(")), PEEK),
+      read_var)
   ) end)
 
 read_exp = read_nonterminal(exp,
@@ -414,10 +480,16 @@ read_exp = read_nonterminal(exp,
   --      functiondef | prefixexp | tableconstructor | exp binop exp | unop exp 
   function() return ALL(
     ANY(
-      TERM("nil"),
-      READ(read_prefixexp)
-    ),
-    READ(read_whitespace, SKIP, OPT)
+      ALL(ANY(
+        TERM("nil"),
+        TERM("false"),
+        TERM("true"),
+        READ(read_number),
+        TERM("...")),
+        READ(read_whitespace)),
+      read_prefixexp,
+      ALL(read_unop, read_exp)
+    )
   ) end)
 
 local read_block
@@ -431,6 +503,38 @@ local read_while = read_nonterminal(_while,
     READ(read_whitespace), -- omit SKIP to prevent "doreturn"
     READ(read_block, OPT),
     TERM("end")
+  ) end)
+
+read_var = read_nonterminal(var,
+  -- var ::=  Name | prefixexp ‘[’ exp ‘]’ | prefixexp ‘.’ Name 
+  function() return ANY(
+    read_Name,
+    ALL(
+      read_prefixexp,
+      READ(read_whitespace, SKIP, OPT),
+      TERM('['),
+      READ(read_whitespace, SKIP, OPT),
+      read_exp,
+      READ(read_whitespace, SKIP, OPT),
+      TERM("]"),
+      READ(read_whitespace, SKIP, OPT)),
+    ALL(
+      read_prefixexp,
+      -- READ(read_whitespace, SKIP, OPT),
+      TERM("."),
+      -- READ(read_whitespace, SKIP, OPT),
+      read_Name)
+  ) end)
+
+local read_varlist = read_nonterminal(varlist,
+  -- varlist ::= var {‘,’ var}
+  function() return ALL(
+    read_var,
+    READ(ALL(
+      READ(read_whitespace, SKIP, OPT),
+      TERM(","),
+      READ(read_whitespace, SKIP, OPT),
+      read_var), REPEAT)
   ) end)
 
 local read_stat = read_nonterminal(stat,
@@ -450,9 +554,15 @@ local read_stat = read_nonterminal(stat,
   --      local function Name funcbody | 
   --      local namelist [‘=’ explist] 
   function() return ANY(
-    TERM(';'),
+    TERM(";"),
+    ALL(
+      read_varlist,
+      READ(read_whitespace, SKIP, OPT),
+      TERM("="),
+      READ(read_whitespace, SKIP, OPT),
+      read_explist),
     read_label,
-    TERM('break'),
+    TERM("break"),
     read_goto,
     read_while
   ) end)
@@ -474,16 +584,20 @@ local read_explist = read_nonterminal(explist,
   function() return ALL(
     read_exp,
     READ(ALL(
-        TERM(","),
-        read_exp), REPEAT)
+      READ(read_whitespace, SKIP, OPT),      
+      TERM(","),
+      READ(read_whitespace, SKIP, OPT),
+      read_exp), REPEAT)
   ) end)
 
 local read_retstat = read_nonterminal(retstat,
+  -- retstat ::= return [explist] [‘;’]
   function() return ALL(
-    read_return,
-    READ(read_whitespace, SKIP),
+    TERM("return"),
+    READ(read_whitespace),
     READ(read_explist, OPT), --should be explist
-    READ(read_semicolon, OPT)
+    READ(TERM(";"), OPT),
+    READ(read_whitespace, SKIP, OPT)
   ) end)
 
 read_block = read_nonterminal(block,
@@ -491,13 +605,14 @@ read_block = read_nonterminal(block,
     READ(read_whitespace, SKIP, OPT),
     READ(read_stat, REPEAT),
     READ(read_whitespace, SKIP, OPT),
-    READ(read_retstat, OPT)
+    READ(read_retstat, OPT),
+    READ(read_whitespace, OPT)
   ) end)
 
 --- Return the default _R table.
 local function block_R()
   return {
-    -- put block level stuff here? or in read_block's own _R
+    -- put block level stuff here? or in read_block"s own _R
     list(read_block)
   }
 end

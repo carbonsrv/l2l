@@ -116,7 +116,17 @@ end
 
 local default_R
 
+local function environ(bytes)
+  return {
+    _META={
+      origin=bytes,
+      source=list.concat(bytes, "")
+    }
+  }
+end
+
 local function execute(reader, environment, bytes)
+  environment = environment or environ(bytes)
   local values, rest = reader(environment, bytes)
   if bytes then
     environment._META[bytes] = values
@@ -188,7 +198,7 @@ local function read_number(environment, bytes)
   local negative, rest = read_predicate(environment,
     id, bind(operator["=="], "-"), bytes)
   local numbers, rest = read_predicate(environment,
-    tonumber, match("^%d*%.?%d+$"), rest)
+    tonumber, match("^%d+%.?%d*$", "^%d*%.?%d+$"), rest)
   if not numbers then
     -- Not a number.
     return nil, bytes
@@ -300,12 +310,22 @@ function default_R()
 end
 
 if debug.getinfo(3) == nil then
+  -- (print ($ ))
+  --[[
+  (print ($ 
+    local $x = 1;
+    local $y =1;
+    local $z={f=1}
+    return x y z.f)
+  ]]--
   local values, rest = read(nil, tolist([[
     (print
-      ($ while(nil)do return(nil);end)
+      ($ return a)
     )]]))
+  -- ($ while(nil)do return(nil),nil end)
   print(values, rest)
   for i, value in ipairs(cdr(car(values))) do
+    -- print(value:is_valid())
     print(show(value:representation()))
   end
 end
@@ -322,6 +342,7 @@ return {
   read_whitespace = read_whitespace,
   execute = execute,
   read_predicate = read_predicate,
+  read_number = read_number,
   match=match
 }
 
