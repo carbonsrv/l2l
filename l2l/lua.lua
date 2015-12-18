@@ -325,6 +325,7 @@ _goto = NonTerminal("goto")
 _while = NonTerminal("while")
 exp = NonTerminal("exp")
 prefixexp = NonTerminal("prefixexp")
+explist = NonTerminal("explist")
 
 local read_semicolon = read_terminal(semicolon)
 local read_coloncolon = read_terminal(coloncolon)
@@ -427,7 +428,7 @@ local read_while = read_nonterminal(_while,
     READ(read_whitespace, SKIP),
     READ(read_exp),
     TERM("do"),
-    READ(read_whitespace), -- required to prevent "doreturn"
+    READ(read_whitespace), -- omit SKIP to prevent "doreturn"
     READ(read_block, OPT),
     TERM("end")
   ) end)
@@ -468,11 +469,20 @@ local read_stat = read_nonterminal(stat,
 --     ALL(read_do, read_block, read_end)
 -- )
 
+local read_explist = read_nonterminal(explist,
+  -- explist ::= exp {‘,’ exp}
+  function() return ALL(
+    read_exp,
+    READ(ALL(
+        TERM(","),
+        read_exp), REPEAT)
+  ) end)
+
 local read_retstat = read_nonterminal(retstat,
   function() return ALL(
     read_return,
     READ(read_whitespace, SKIP),
-    READ(read_exp, OPT), --should be explist
+    READ(read_explist, OPT), --should be explist
     READ(read_semicolon, OPT)
   ) end)
 
