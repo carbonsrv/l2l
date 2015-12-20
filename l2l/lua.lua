@@ -16,6 +16,13 @@ local keys = itertools.keys
 local flip = itertools.flip
 local bind = itertools.bind
 local slice = itertools.slice
+local operator = require("l2l.operator")
+local scan = itertools.scan
+local span = itertools.span
+local last = itertools.last
+local id = itertools.id
+local match = reader.match
+
 
 local raise = exception.raise
 
@@ -28,7 +35,7 @@ local match = reader.match
 
 local ExpectedNonTerminalException =
   exception.Exception("ExpectedNonTerminalException",
-    "Expected %s")
+    "Expected %s, at %s")
 local ParseException =
   exception.Exception("ParseException",
     "An exception occurred while parsing `%s`:\n  %s")
@@ -307,12 +314,147 @@ local function read_terminal(terminal)
   return reader
 end
 
-local function read_nonterminal(nonterminal, factory, const)
+local function tree_filter(f_child, rule)
+  assert(is(rule), rule)
+  local origin = list(nil)
+  local last = origin
+  for i, value in ipairs(rule) do
+    if type(value) == "table" then
+      if f_child(value, rule) then
+        last[2] = cons(value)
+        last = last[2]
+      end
+      if is(value) and not is(value, SKIP) then
+        last[2] = tree_filter(f_child, value)
+        if last[2] then
+          last = last[2]
+        end
+      end
+    end
+  end
+  return origin[2]
+end
+
+local read_nonterminal
+-- Return how many times child should be recursively called.
+local function find_maximum_count(environment, bytes, head, parent, child)
+  local tail = child.factory(environment, bytes, list(),
+    function(head, nonterminal, reader)
+      return reader
+    end)
+
+  -- print(parent, child, head, tail)
+  if child == var then
+    -- print("  head", head, parent, child, bytes)
+  end
+  local values, rest = head(environment, bytes)
+  if child == var then
+    -- print("  donehead", head, parent, child, values, rest == bytes, rest)
+  end
+
+  if values == nil and rest == bytes then
+    return 0
+  end
+
+  local minimum_repeats = 1
+
+  tree_filter(function(value, rule)
+    if getmetatable(rule) == ALL then
+      return false
+    end
+    local found = false
+    for i, reader in ipairs(value) do
+      if type(reader) == "table" and reader.target == parent then
+        found = true
+        break
+      end
+    end
+    if not found then
+      if minimum_repeats > 0 and value(environment, bytes) then
+        minimum_repeats = 0
+      end
+    end
+  end, tail)
+
+  local spans = tree_filter(function(value)
+    if getmetatable(value) ~= ALL then
+      return false
+    end
+    local found = false
+    for i, reader in ipairs(value) do
+      if type(reader) == "table" and reader.target == parent then
+        found = true
+        break
+      end
+    end
+    return found
+  end, tail)
+
+  -- ALL rule spans beginning with `parent`.
+  local sections = map(function(section)
+    local index
+    for i, value in ipairs(section) do
+      if value.target == parent then 
+        index = i
+        break
+      end
+    end
+    local span = ALL(unpack(slice(section, index + 1)))
+    return read_nonterminal(NonTerminal(tostring(span)), function()
+      return span
+    end, true)
+  end, spans)
+
+
+
+  local repeats = ALL(READ(ANY(list.unpack(sections)), REPEAT))
+  --
+  -- print("\nrepeats", repeats, rest)
+
+  if child == var then
+    -- print("  tail", repeats, child, rest)
+  end
+  -- print(repeats)
+  local ok, values, _rest = pcall(repeats, environment, rest)
+  -- print("\nrepeats", repeats, ok and values, "<", values)
+  -- print("donerepeats", repeats, rest, count)
+  if child == var then
+    -- print("  donetail", repeats, child, values, _rest)
+  end
+  if not ok then
+    return 0
+  end
+  -- print(head, repeats, bytes)
+  local count = list.__len(values)
+  -- print(child, count, minimum_repeats)
+  return count + (1-minimum_repeats)
+end
+
+
+read_nonterminal = function(nonterminal, factory, const)
   assert(factory, "missing `factory` argument")
-  local origin, ok
+  local maximum_counts, origin, ok = {}
+
   local reader = SET(nonterminal, function(environment, bytes, targets)
+    assert(targets)
+    -- print("  running", nonterminal, targets)
     if not origin or not const then
-      ok, origin = pcall(factory, environment, bytes, targets)
+      ok, origin = pcall(factory, environment, bytes, targets,
+        function(head, child, reader)
+          local count = list.count(targets, child)
+          maximum_counts[bytes] = maximum_counts[bytes] or {}
+          local maximum_count = maximum_counts[bytes][child]
+          if not maximum_count then
+            maximum_counts[bytes][child] = 1
+            maximum_count = find_maximum_count(environment, bytes,
+              head, nonterminal, child)
+            maximum_counts[bytes][child] = maximum_count
+          end
+          if child == var then
+            -- print(child, count, maximum_count,  (count == 0 or count < maximum_count) and reader, bytes)
+          end
+          return (count == 0 or count < maximum_count) and reader
+        end)
       if not ok then
         local err = origin
         raise(GrammarException(environment, bytes, nonterminal, err))
@@ -321,7 +463,7 @@ local function read_nonterminal(nonterminal, factory, const)
     -- print("[", nonterminal, bytes)
     local ok, values, rest = pcall(execute, origin, environment, bytes,
       targets)
-    -- print("]", nonterminal, bytes, ok, values)
+    -- print("]", nonterminal, rest, ok, values)
     if not ok then
       local err = values
       if getmetatable(values) == ExpectedNonTerminalException then
@@ -333,7 +475,8 @@ local function read_nonterminal(nonterminal, factory, const)
       end
     end
     if #({list.unpack(values)}) == 0 then
-      raise(ExpectedNonTerminalException(environment, bytes, origin))
+      raise(ExpectedNonTerminalException(environment, bytes, origin,
+        show(list.concat(bytes))))
     end
     return list(nonterminal(list.unpack(values))), rest
   end, factory)
@@ -490,14 +633,6 @@ read_number = SET(number, function(environment, bytes)
   return nil, bytes
 end)
 
-
-local operator = require("l2l.operator")
-local scan = itertools.scan
-local span = itertools.span
-local last = itertools.last
-local id = itertools.id
-local match = reader.match
-
 local read_whitespace = SET(whitespace, function(environment, bytes)
 -- * Mandatory read_whitespace after keywords should not be "SKIP"ed.
 --   Otherwise when output the code could produce like "gotolabel",
@@ -596,43 +731,13 @@ local read_args = read_nonterminal(_args,
 
 local read_functioncall = read_nonterminal(functioncall,
   -- functioncall ::=  prefixexp args | prefixexp ‘:’ Name args 
-  function(environment, bytes, targets)
-    local has_prefixexp, has_functioncall
-    -- if environment._META[bytes] then
-    --   if environment._META[bytes].read == read_prefixexp then
-    --     has_prefixexp = true
-    --   end
-    -- end
-    -- if environment._META[bytes] then
-    --   if environment._META[bytes].read == read_functioncall then
-    --     has_functioncall = true
-    --   end
-    -- end
-
-    -- print( ">>", has_prefixexp, has_functioncall, list.contains(targets, functioncall), bytes)
+  function()
     return ANY(
-      -- list.contains(targets, functioncall) and ALL(
-      --   read_functioncall,
-      --   READ(read_whitespace, SKIP, OPT),
-      --   read_args),
       ALL(
         read_prefixexp,
         READ(read_whitespace, SKIP, OPT),
         read_args)
-      -- ALL(
-      --   ALL(
-      --   read_prefixexp,
-      --   READ(read_whitespace, SKIP, OPT),
-      --   read_args))
-    -- ALL(
-    --   not is_looping and read_prefixexp,
-    --   READ(read_whitespace, SKIP, OPT),
-    --   TERM(":"),
-    --   READ(read_whitespace, SKIP, OPT),
-    --   read_Name,
-    --   READ(read_whitespace, SKIP, OPT),
-    --   read_args)
-  ) end)
+  ) end, true)
 
 local read_while = read_nonterminal(_while,
   -- while exp do block end
@@ -665,134 +770,33 @@ read_exp = read_nonterminal(exp,
   ) end, true)
 
 
-local function lookahead(environment, bytes, targets, functioncall, reader)
-  local functioncall_count = list.count(targets, functioncall)
-  local maximum_count = 2
-  -- print(">>: count", functioncall_count)
-  local values, rest
-  while true do
-    values, rest = ANY(
-        functioncall_count < maximum_count and reader
-    )(environment, bytes, targets)
-
-    print("?", values, rest, rest == bytes, reader, maximum_count, functioncall_count)
-    if values then
-      print(values, functioncall_count, rest)
-      -- os.exit()
-    else
-      return 0
-    end
-    maximum_count = maximum_count + 1
-    if maximum_count > 4 then
-      break
-    end
-  end
-  return 4
-  -- print(values, rest)
-
-end
-
-local function tree_filter(f_child, rule)
-  assert(is(rule), rule)
-  local origin = list(nil)
-  local last = origin
-  for i, value in ipairs(rule) do
-    if type(value) == "table" then
-      if f_child(value, rule) then
-        last[2] = cons(value)
-        last = last[2]
-      end
-      if is(value) and not is(value, SKIP) then
-        last[2] = tree_filter(f_child, value)
-        if last[2] then
-          last = last[2]
-        end
-      end
-    end
-  end
-  return origin[2]
-end
-
-local function find_maximum_count(environment, bytes, targets, rule, nonterminal)
-  if not targets then
-    return 0
-  end
-  local head = nonterminal.factory(environment, bytes)
-  local sections = tree_filter(function(value, parent)
-      if getmetatable(value) ~= ALL then
-        return false
-      end
-      local found = false
-      for i, reader in ipairs(value) do
-        if type(reader) == "table" and reader.target == nonterminal then
-          found = true
-          break
-        end
-      end
-      return found
-    end, rule)
-
-  local values, rest = head(environment, bytes, targets)
-  if not values and rest == bytes then
-    return 1
-  end
-  sections = map(function(section)
-    local nonterminals = map(bind(operator["[]"], "target"), section)
-    local index = contains(nonterminals, nonterminal)
-    return ALL(unpack(slice(section, index + 1)))
-  end, sections)
-  local repeats = ALL(READ(ANY(unpack(sections)), REPEAT))
-  return list.__len(repeats(environment, rest))
-end
 
 read_prefixexp = read_nonterminal(prefixexp,
   -- prefixexp ::= var | functioncall | ‘(’ exp ‘)’
-  function(environment, bytes, targets) 
-    -- Targets is a stack of nonterminals that have been called for the current
-    -- byte.
-    local target = targets and cdr(targets) and car(cdr(targets))
-    -- print(target)
-    local from_functioncall = target == functioncall
-    local from_var = target == var
-    -- print("from_functioncall", from_functioncall)
-    -- not from_functioncall and 
-    -- print(list.count(targets, functioncall))
-    local functioncall_count = targets and list.count(cdr(targets), functioncall) or 0
-    local functioncall_maximum_count = not from_var and find_maximum_count(
-      environment,
-      bytes,
-      targets,
-      functioncall.factory(environment, bytes),
-      prefixexp) or 0--> get the bits after prefixexp inside functioncall, then READ(ANY(bits), REPEAT) and return the count. 
-    -- print(bytes, show(environment._META))
-    -- print("begin")
+  function(environment, bytes, targets, left)
+    local read_head = ALL(
+      READ(TERM("("), OPT),
+      READ(read_whitespace, SKIP, OPT),
+      read_Name,
+      READ(read_whitespace, SKIP, OPT),
+      READ(TERM(")"), OPT))
 
-    -- print(functioncall_maximum_count)
-
-    
-    -- local functioncall_maximum_count = 1
-    -- if functioncall_count > 0 then
-    --   maximum_count = lookahead(environment, bytes, targets, functioncall, read_functioncall)
-    -- end
-    -- print("end")
-    -- print(">>", functioncall_count)
-    -- print(targets)
-    -- print(from_var)
     return ANY(
       -- I don't know how many times i need to loop
       -- need to guess...
       -- can't be too many or too little
-      functioncall_count < functioncall_maximum_count and ALL(
+      -- left_recurse(environment, bytes, targets, functioncall, prefixexp)
+      -- functioncall_count < functioncall_maximum_count and 
+      left(read_head, functioncall, ALL(
         -- Give the parser a hint to avoid infinite loop on Left-recursion.
-        -- When it comes down to it `functioncall` can only begin with a 
-        -- Name or "(".
-          READ(ANY(read_Name, TERM("(")), PEEK),
-          read_functioncall),
-      not from_var and ALL(
-        -- Give the parser a hint to avoid infinite loop on Left-recursion.
-        -- When it comes down to it `var` can only begin with a Name or "(".
+        -- `functioncall` can only begin with a Name or "(".
         READ(ANY(read_Name, TERM("(")), PEEK),
-        read_var),
+        read_functioncall)),
+      left(read_head, var, ALL(
+        -- Give the parser a hint to avoid infinite loop on Left-recursion.
+        -- `var` can only begin with a Name or "(".
+        READ(ANY(read_Name, TERM("(")), PEEK),
+        read_var)),
       ALL(
         TERM("("),
         READ(read_whitespace, SKIP, OPT),
@@ -805,7 +809,7 @@ read_prefixexp = read_nonterminal(prefixexp,
 
 read_var = read_nonterminal(var,
   -- var ::=  Name | prefixexp ‘[’ exp ‘]’ | prefixexp ‘.’ Name 
-  function(environment, bytes)
+  function(environment, bytes, targets, left)
     local has_prefixexp
     -- Check if read_prefixexp is already read
     if environment._META[bytes] then
@@ -815,15 +819,7 @@ read_var = read_nonterminal(var,
     end
     return ANY(
       ALL(
-        -- ANY cuts out at read_Name for a.b, if we don't have this. 
-        read_Name,
-        READ(read_whitespace, SKIP, OPT),
-        TERM("."),
-        READ(read_whitespace, SKIP, OPT),
-        read_Name),
-      read_Name,
-      ALL(
-        not has_prefixexp and read_prefixexp,
+        read_prefixexp,
         READ(read_whitespace, SKIP, OPT),
         TERM('['),
         READ(read_whitespace, SKIP, OPT),
@@ -832,11 +828,12 @@ read_var = read_nonterminal(var,
         TERM("]"),
         READ(read_whitespace, SKIP, OPT)),
       ALL(
-        not has_prefixexp and read_prefixexp,
+        read_prefixexp,
         READ(read_whitespace, SKIP, OPT),
         TERM("."),
         READ(read_whitespace, SKIP, OPT),
-        read_Name)
+        read_Name),
+      read_Name
     ) end)
 
 local read_varlist = read_nonterminal(varlist,
@@ -938,9 +935,9 @@ local function block_R()
   }
 end
 
--- print(car(execute(read_block, nil, tolist("while not true do return a, b end"))))
 return {
     block_R = block_R,
     read_functioncall = read_functioncall,
-    read_retstat = read_retstat
+    read_retstat = read_retstat,
+    read_Name = read_Name
 }
