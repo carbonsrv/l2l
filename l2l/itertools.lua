@@ -94,6 +94,18 @@ list = setmetatable({
       return list.push(pair({obj, self}), ...)
     end
   end,
+  count = function(self, obj)
+    local value = 0
+    if not self then
+      return 0
+    end
+    for _, v in ipairs(self) do
+      if v == obj then
+        value = value + 1
+      end
+    end
+    return value
+  end,
   contains = function(self, obj)
     if not self then
       return false
@@ -289,6 +301,16 @@ local function each(f, objs)
   return orig[2]
 end
 
+local function keys(objs)
+  local orig = pair({nil})
+  local last = orig
+  for k, _ in pairs(objs) do
+    last[2] = cons(k, nil)
+    last = last[2]
+  end
+  return orig[2]
+end
+
 local function contains(objs, target)
   for _, v in pairs(objs or {}) do
     if v == target then
@@ -395,7 +417,7 @@ local function take(n, objs)
 end
 
 local function drop(n, objs)
-  if n <= 0 then
+  if n <= 0 or not objs then
     return objs
   end
   return drop(n-1, cdr(objs))
@@ -429,5 +451,6 @@ return {
   cdr=cdr,
   take=take,
   drop=drop,
-  filter=filter
+  filter=filter,
+  keys=keys
 }
