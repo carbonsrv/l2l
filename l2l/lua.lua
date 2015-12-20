@@ -15,6 +15,7 @@ local contains = itertools.contains
 local keys = itertools.keys
 local flip = itertools.flip
 local bind = itertools.bind
+local slice = itertools.slice
 
 local raise = exception.raise
 
@@ -23,6 +24,7 @@ local execute = reader.execute
 local read_predicate = reader.read_predicate
 local read_number = reader.read_number
 local match = reader.match
+
 
 local ExpectedNonTerminalException =
   exception.Exception("ExpectedNonTerminalException",
@@ -310,7 +312,7 @@ local function read_nonterminal(nonterminal, factory, const)
   local origin, ok
   local reader = SET(nonterminal, function(environment, bytes, targets)
     if not origin or not const then
-      ok, origin = pcall(factory, environment, bytes, cdr(targets))
+      ok, origin = pcall(factory, environment, bytes, targets)
       if not ok then
         local err = origin
         raise(GrammarException(environment, bytes, nonterminal, err))
@@ -616,12 +618,12 @@ local read_functioncall = read_nonterminal(functioncall,
       ALL(
         read_prefixexp,
         READ(read_whitespace, SKIP, OPT),
-        read_args),
-      ALL(
-        ALL(
-        read_prefixexp,
-        READ(read_whitespace, SKIP, OPT),
-        read_args))
+        read_args)
+      -- ALL(
+      --   ALL(
+      --   read_prefixexp,
+      --   READ(read_whitespace, SKIP, OPT),
+      --   read_args))
     -- ALL(
     --   not is_looping and read_prefixexp,
     --   READ(read_whitespace, SKIP, OPT),
@@ -711,18 +713,36 @@ local function tree_filter(f_child, rule)
   return origin[2]
 end
 
-local function find_maximum_count(environment, bytes, parent, child)
-  local read = parent.factory(environment, bytes)
+local function find_maximum_count(environment, bytes, targets, rule, nonterminal)
+  if not targets then
+    return 0
+  end
+  local head = nonterminal.factory(environment, bytes)
   local sections = tree_filter(function(value, parent)
-      local contains_child = false
+      if getmetatable(value) ~= ALL then
+        return false
+      end
+      local found = false
       for i, reader in ipairs(value) do
-        if type(reader) == "table" and reader.target == child then
-          contains_child = true
+        if type(reader) == "table" and reader.target == nonterminal then
+          found = true
+          break
         end
       end
-      return getmetatable(value) == ALL and contains_child
-    end, read)
-  return nil
+      return found
+    end, rule)
+
+  local values, rest = head(environment, bytes, targets)
+  if not values and rest == bytes then
+    return 1
+  end
+  sections = map(function(section)
+    local nonterminals = map(bind(operator["[]"], "target"), section)
+    local index = contains(nonterminals, nonterminal)
+    return ALL(unpack(slice(section, index + 1)))
+  end, sections)
+  local repeats = ALL(READ(ANY(unpack(sections)), REPEAT))
+  return list.__len(repeats(environment, rest))
 end
 
 read_prefixexp = read_nonterminal(prefixexp,
@@ -730,19 +750,24 @@ read_prefixexp = read_nonterminal(prefixexp,
   function(environment, bytes, targets) 
     -- Targets is a stack of nonterminals that have been called for the current
     -- byte.
-    local target = cdr(targets) and car(targets)
+    local target = targets and cdr(targets) and car(cdr(targets))
+    -- print(target)
     local from_functioncall = target == functioncall
     local from_var = target == var
     -- print("from_functioncall", from_functioncall)
     -- not from_functioncall and 
     -- print(list.count(targets, functioncall))
-    local functioncall_count = list.count(targets, functioncall)
-    local functioncall_maximum_count = find_maximum_count(
-      environment, bytes,
-      functioncall,
-      prefixexp) --> get the bits after prefixexp inside functioncall, then READ(ANY(bits), REPEAT) and return the count. 
+    local functioncall_count = targets and list.count(cdr(targets), functioncall) or 0
+    local functioncall_maximum_count = not from_var and find_maximum_count(
+      environment,
+      bytes,
+      targets,
+      functioncall.factory(environment, bytes),
+      prefixexp) or 0--> get the bits after prefixexp inside functioncall, then READ(ANY(bits), REPEAT) and return the count. 
     -- print(bytes, show(environment._META))
     -- print("begin")
+
+    -- print(functioncall_maximum_count)
 
     
     -- local functioncall_maximum_count = 1
@@ -751,6 +776,8 @@ read_prefixexp = read_nonterminal(prefixexp,
     -- end
     -- print("end")
     -- print(">>", functioncall_count)
+    -- print(targets)
+    -- print(from_var)
     return ANY(
       -- I don't know how many times i need to loop
       -- need to guess...
