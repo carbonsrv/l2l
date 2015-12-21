@@ -44,7 +44,7 @@
     `(,true "($ return a(b), nil)")
     `(,true "($ return a(b)(c), nil)")
     `(,true "($ return a[b][c]   )")
-    `(,true "($ return a[b](c)[d](e)   )")
+    `(,true "($ return a[b](c)   )")
   ]
   reader (require "l2l.reader3"))
 
