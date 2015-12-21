@@ -336,28 +336,19 @@ local function tree_filter(f_child, rule)
 end
 
 local read_nonterminal
+
+
 -- Return how many times child should be recursively called.
 local function find_maximum_count(environment, bytes, head, parent, child)
   local tail = child.factory(environment, bytes, list(),
     function(head, nonterminal, reader)
       return reader
     end)
-
-  -- print(parent, child, head, tail)
-  if child == var then
-    -- print("  head", head, parent, child, bytes)
-  end
   local values, rest = head(environment, bytes)
-  if child == var then
-    -- print("  donehead", head, parent, child, values, rest == bytes, rest)
-  end
-
   if values == nil and rest == bytes then
     return 0
   end
-
   local minimum_repeats = 1
-
   tree_filter(function(value, rule)
     if getmetatable(rule) == ALL then
       return false
@@ -404,29 +395,12 @@ local function find_maximum_count(environment, bytes, head, parent, child)
       return span
     end, true)
   end, spans)
-
-
-
   local repeats = ALL(READ(ANY(list.unpack(sections)), REPEAT))
-  --
-  -- print("\nrepeats", repeats, rest)
-
-  if child == var then
-    -- print("  tail", repeats, child, rest)
-  end
-  -- print(repeats)
   local ok, values, _rest = pcall(repeats, environment, rest)
-  -- print("\nrepeats", repeats, ok and values, "<", values)
-  -- print("donerepeats", repeats, rest, count)
-  if child == var then
-    -- print("  donetail", repeats, child, values, _rest)
-  end
   if not ok then
     return 0
   end
-  -- print(head, repeats, bytes)
   local count = list.__len(values)
-  -- print(child, count, minimum_repeats)
   return count + (1-minimum_repeats)
 end
 
@@ -436,10 +410,8 @@ read_nonterminal = function(nonterminal, factory, const)
   local maximum_counts, origin, ok = {}
 
   local reader = SET(nonterminal, function(environment, bytes, targets)
-    assert(targets)
-    -- print("  running", nonterminal, targets)
     if not origin or not const then
-      ok, origin = pcall(factory, environment, bytes, targets,
+      ok, origin = pcall(factory, environment, bytes,
         function(head, child, reader)
           local count = list.count(targets, child)
           maximum_counts[bytes] = maximum_counts[bytes] or {}
@@ -449,9 +421,6 @@ read_nonterminal = function(nonterminal, factory, const)
             maximum_count = find_maximum_count(environment, bytes,
               head, nonterminal, child)
             maximum_counts[bytes][child] = maximum_count
-          end
-          if child == var then
-            -- print(child, count, maximum_count,  (count == 0 or count < maximum_count) and reader, bytes)
           end
           return (count == 0 or count < maximum_count) and reader
         end)
@@ -773,7 +742,7 @@ read_exp = read_nonterminal(exp,
 
 read_prefixexp = read_nonterminal(prefixexp,
   -- prefixexp ::= var | functioncall | ‘(’ exp ‘)’
-  function(environment, bytes, targets, left)
+  function(environment, bytes, left)
     local read_head = ALL(
       READ(TERM("("), OPT),
       READ(read_whitespace, SKIP, OPT),
@@ -809,14 +778,7 @@ read_prefixexp = read_nonterminal(prefixexp,
 
 read_var = read_nonterminal(var,
   -- var ::=  Name | prefixexp ‘[’ exp ‘]’ | prefixexp ‘.’ Name 
-  function(environment, bytes, targets, left)
-    local has_prefixexp
-    -- Check if read_prefixexp is already read
-    if environment._META[bytes] then
-      if environment._META[bytes].read == read_prefixexp then
-        has_prefixexp = true
-      end
-    end
+  function()
     return ANY(
       ALL(
         read_prefixexp,
@@ -834,7 +796,7 @@ read_var = read_nonterminal(var,
         READ(read_whitespace, SKIP, OPT),
         read_Name),
       read_Name
-    ) end)
+    ) end, true)
 
 local read_varlist = read_nonterminal(varlist,
   -- varlist ::= var {‘,’ var}
