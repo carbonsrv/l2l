@@ -143,10 +143,10 @@ Exception = setmetatable({
           return value
         end, parameters))
   end,
-  __call = function(self, environment, bytes, ...)
+  __call = function(self, bytes, position, ...)
     local parameters = {...}
     return setmetatable({
-        environment=environment, 
+        position=position, 
         bytes=bytes,
         arguments={...},
         name=self.name,
@@ -164,10 +164,10 @@ Exception = setmetatable({
       name = name,
       message = message or "",
       __tostring = function(self)
-        local length = #self.environment._META.source
+        local length = #self.bytes
         local lines = formatsource(
-          self.environment._META.source, self.message(),
-          math.min(length  - #list.concat(self.bytes) + 1, length))
+          list.concat(self.bytes, ""), self.message(),
+          math.min(length  - #self.position + 1, length))
         return ("%s: %s\n%s"):format(
           self.name,
           table.concat(lines, "\n"),
