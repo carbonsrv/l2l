@@ -76,9 +76,9 @@ local function matchreadmacro(_R, byte)
   -- O(N) Default macros; N = number of read macro indices.
   return 1
 end
-
+local concat = itertools.concat
 local function Meta(bytes, rest, children)
-  return {bytes=bytes, rest=rest, children=children}
+  return {bytes=concat("", bytes), rest=concat("", rest), children=children}
 end
 
 local function nextreadmacro(invariant, bytes)
@@ -131,7 +131,7 @@ local function read_predicate(bytes, transform, predicate)
   if #token == 0 then
     return bytes
   end
-  return rest, list(transform(token)), Meta(bytes, rest)
+  return rest, list(transform(token)), list(Meta(bytes, rest))
 end
 
 local function read_symbol(invariant, bytes)
@@ -174,7 +174,7 @@ local nextnonparen = nextuntil(read_right_paren)
 local function read_list(invariant, bytes)
   local rest, values, children = traverse(nextnonparen, invariant, bytes[2])
   rest = cdr(nextreadmacro(invariant, rest))
-  return rest, cons(tolist(join(values))), Meta(bytes, rest, children)
+  return rest, cons(tolist(join(values))), list(Meta(bytes, rest, children))
 end
 
 local nextnonbrace = nextuntil(read_right_brace)
@@ -182,7 +182,8 @@ local function read_dict(invariant, bytes)
   local rest, values, children = traverse(nextnonbrace, invariant, bytes[2])
   rest = cdr(nextreadmacro(invariant, rest))
   return rest, cons(cons(symbol("dict"), tolist(join(values)))),
-    Meta(bytes, rest, children)
+    list(Meta(bytes, rest,
+      list.insert(children, Meta(bytes, cdr(bytes)))))
 end
 
 local nextnonbracket = nextuntil(read_right_bracket)
@@ -190,7 +191,8 @@ local function read_vector(invariant, bytes)
   local rest, values, children = traverse(nextnonbracket, invariant, bytes[2])
   rest = cdr(nextreadmacro(invariant, rest))
   return rest, cons(cons(symbol("vector"), tolist(join(values)))),
-    Meta(bytes, rest, children)
+    list(Meta(bytes, rest,
+      list.insert(children, Meta(bytes, cdr(bytes)))))
 end
 
 local function read_whitespace(_, bytes)
@@ -207,7 +209,7 @@ local function read_number(invariant, bytes)
     return bytes
   end
   local number = car(numbers)
-  return rest, list(negative and -number or number), Meta(bytes, rest)
+  return rest, list(negative and -number or number), list(Meta(bytes, rest))
 end
 
 local function read_string(invariant, bytes)
@@ -233,31 +235,31 @@ local function read_string(invariant, bytes)
   if not byte then
     raise(UnmatchedDoubleQuoteException(invariant.first, rest))
   end
-  return rest, list(text), Meta(bytes, rest)
+  return rest, list(text), list(Meta(bytes, rest))
 end
 
 local function read_quasiquote(invariant, bytes)
   local rest, values, children = read(invariant, cdr(bytes))
   return rest,
     list(cons(symbol('quasiquote'), values)),
-    Meta(bytes, rest,
-      list.insert(children, Meta(bytes, cdr(bytes))))
+    list(Meta(bytes, rest,
+      list.insert(children, Meta(bytes, cdr(bytes)))))
 end
 
 local function read_quasiquote_eval(invariant, bytes)
   local rest, values, children = read(invariant, cdr(bytes))
   return rest,
     list(cons(symbol('quasiquote-eval'), values)),
-    Meta(bytes, rest,
-      list.insert(children, Meta(bytes, cdr(bytes))))
+    list(Meta(bytes, rest,
+      list.insert(children, Meta(bytes, cdr(bytes)))))
 end
 
 local function read_quote(invariant, bytes)
   local rest, values, children = read(invariant, cdr(bytes))
   return rest,
     list(cons(symbol('quote'), values)),
-    Meta(bytes, rest,
-      list.insert(children, Meta(bytes, cdr(bytes))))
+    list(Meta(bytes, rest,
+      list.insert(children, Meta(bytes, cdr(bytes)))))
 end
 
 -- "Mint" an `invariant` for the read function for a list or a string of bytes.
@@ -269,6 +271,7 @@ local function invarymint(bytes)
   end
   return {
     _R = {
+      ["\\"] = list(read_lua),
       ["("] = list(read_list),
       [")"] = list(read_right_paren),
       ['{'] = list(read_dict),
@@ -347,12 +350,13 @@ function read(invariant, bytes)
     end
   end
 end
-if debug.getinfo(3) == nil then
-  local join = itertools.join
-  local rest, values, meta = show(read([[`(1 ,2)]]))
-  print(values)
-end
 
+if debug.getinfo(3) == nil then
+  local rest, values, meta = read("[(print `1)]")
+
+  print(values)
+  print(meta)
+end
 
 return {
   symbol = symbol,
@@ -367,6 +371,7 @@ return {
   read_right_paren = read_right_paren,
   read_symbol = read_symbol,
   invarymint=invarymint,
+  environ=invarymint,
   EOFException = EOFException,
   UnmatchedReadMacroException = UnmatchedReadMacroException,
   UnmatchedRightParenException = UnmatchedRightParenException,
@@ -375,6 +380,7 @@ return {
   UnmatchedDoubleQuoteException = UnmatchedDoubleQuoteException,
   LuaSemicolonException = LuaSemicolonException,
   LuaBlockException = LuaBlockException,
-  LuaException = LuaException
+  LuaException = LuaException,
+  Meta=Meta
 }
 

@@ -295,16 +295,15 @@ end
 
 list = setmetatable({
   -- Static
-  prepend = function(a, ...)
-    return pair({a, tolist(...)})
-  end,
-  -- Static
   iterate = function(f)
     return tolist(iterate(f))
   end,
   -- Static
   generate = function(f)
     return tolist(generate(f))
+  end,
+  extend = function(self, l)
+    error("not implemented")
   end,
   unpack = function(self)
     if self then
@@ -518,11 +517,49 @@ local function cons(a, b)
   return pair({a, b})
 end
 
+local function last(nextvalue, invariant, state)
+  local obj
+  for _, value in tonext(nextvalue, invariant, state) do
+    obj = value
+  end
+  return obj
+end
+
+local function mapcar(f, l)
+  f = f or id
+  return function(invariant, index)
+    local state = invariant[index]
+    if not state then
+      return nil
+    end
+    invariant[index + 1] = cdr(state)
+    return index + 1, f(state)
+  end, {[0]=l}, 0
+end
+
 queue = setmetatable({
   -- `queue` inserts into the back, and removes from the front.
   insert = function(self, value)
+    -- Set the cdr of the last element.
     self[1][2] = cons(value)
+    -- Update the last element to it's cdr.
     self[1] = self[1][2]
+    return self
+  end,
+  extend = function(self, nextvalue, invariant, state)
+    if getmetatable(nextvalue) == queue then
+      -- Set the cdr of the last element.
+      self[1][2] = nextvalue[2]
+      -- Update the last element to last of `other`.
+      self[1] = nextvalue[1][2] or self
+    elseif getmetatable(nextvalue) == list then
+      self[1][2] = last(mapcar(id, nextvalue))
+      self[1] = self[1][2] or self
+    else
+      for i, value in tonext(nextvalue, invariant, state) do
+        self:insert(value)
+      end
+    end
     return self
   end,
   remove = function(self)
@@ -553,7 +590,7 @@ queue = setmetatable({
     return list.concat(self[2], separator)
   end
 }, {__call = function(queue, ...)
-    local origin = list(nil)
+    local origin = cons(nil)
     local last = origin
     for i=1, select("#", ...) do
       last[2] = cons(select(i, ...))
@@ -566,18 +603,6 @@ queue = setmetatable({
 
 queue.__index = queue
 
-
-local function mapcar(f, l)
-  f = f or id
-  return function(invariant, index)
-    local state = invariant[index]
-    if not state then
-      return nil
-    end
-    invariant[index + 1] = cdr(state)
-    return index + 1, f(state)
-  end, {[0]=l}, 0
-end
 
 local function arguments(...)
   local count = select("#", ...)
@@ -694,14 +719,6 @@ local function keys(nextvalue, invariant, state)
       return index + 1, state
     end
   end, invariant, 0
-end
-
-local function last(nextvalue, invariant, state)
-  local obj
-  for _, value in tonext(nextvalue, invariant, state) do
-    obj = value
-  end
-  return obj
 end
 
 local function flip(f) return
