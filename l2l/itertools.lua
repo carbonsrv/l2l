@@ -393,6 +393,9 @@ list = setmetatable({
     return count
   end,
   __eq = function(self, other)
+    if rawequal(self, other) then
+      return true
+    end
     while self and other do
       if self == nil and other == nil then
         return true
@@ -670,6 +673,15 @@ local function fold(f, initial, nextvalue, invariant, state)
   return initial
 end
 
+local function tee(...)
+  local params={...}
+  return function(...)
+    print("Tee:")
+    print("  ", unpack(params))
+    print("  ", ...)
+    return ...
+  end
+end
 
 -- Returns a concatenation of each sequence returned by 
 -- `nextvalue, invariant, state`.
@@ -719,7 +731,7 @@ end
 
 local function search(f, nextvalue, invariant, state)
   for i, v in tonext(nextvalue, invariant, state) do
-    if f(v) then
+    if f(v, i) then
       return v, i
     end
   end
@@ -1051,6 +1063,7 @@ return {
   map=map,
   maparg=maparg,
   mapcar=mapcar,
+  tee=tee,
   match=match,
   pack=pack,
   pair=pair,

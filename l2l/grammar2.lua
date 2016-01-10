@@ -1,35 +1,33 @@
+local exception = require("l2l.exception2")
 local itertools = require("l2l.itertools")
 local reader = require("l2l.reader3")
-local exception = require("l2l.exception2")
 
+local asvector = itertools.asvector
+local bind = itertools.bind
 local car = itertools.car
 local cdr = itertools.cdr
-local cons = itertools.cons
-local drop = itertools.drop
-local id = itertools.id
-local list = itertools.list
-local tolist = itertools.tolist
-local slice = itertools.slice
-local concat = itertools.concat
-local tovector = itertools.tovector
-local empty = itertools.empty
-local show = itertools.show
-local tonext = itertools.tonext
-local queue = itertools.queue
-local search = itertools.search
-local map = itertools.map
-local join = itertools.join
-local unique = itertools.unique
-local range = itertools.range
-local filter = itertools.filter
-local bind = itertools.bind
-local indexof = itertools.indexof
-local index = itertools.index
 local compose = itertools.compose
-local zip = itertools.zip
-local foreach = itertools.foreach
-local asvector = itertools.asvector
-local take = itertools.take
+local concat = itertools.concat
+local cons = itertools.cons
+local contains = itertools.contains
+local drop = itertools.drop
+local each = itertools.each
+local filter = itertools.filter
+local flip = itertools.flip
+local id = itertools.id
+local index = itertools.index
+local indexof = itertools.indexof
+local isinstance = itertools.isinstance
+local join = itertools.join
+local list = itertools.list
+local map = itertools.map
+local queue = itertools.queue
+local range = itertools.range
+local search = itertools.search
+local show = itertools.show
+local tolist = itertools.tolist
+local tovector = itertools.tovector
+local unique = itertools.unique
 
 local raise = exception.raise
 local execute = reader.execute
@@ -55,7 +53,7 @@ end
 local function isgrammar(obj, kind)
   local mt = getmetatable(obj)
   if kind then
-    return mt == kind
+    return mt == kind or (type(obj) == "string" and kind == terminal)
   end
   return mt == mark or mt == span or mt == any or 
     mt == terminal or mt == factor
@@ -69,8 +67,8 @@ end
 local function factor_terminal(value, f)
   local count = #value
   local cache = {}
-  return terminal(value, function(_, bytes)
-    if not bytes then
+  return terminal(value, function(_, bytes, limit)
+    if not bytes or bytes == limit then
       return
     end
     if not cache[bytes] then
@@ -102,23 +100,25 @@ local repeating = "repeating"
 
 mark = setmetatable({
   __mod = mod_apply,
-  __call = function(self, invariant, bytes, ...)
+  __call = function(self, invariant, bytes, limit, ...)
     local term, values, metas, rest = self[1], queue(), queue(), bytes
     local ok, value, meta, prev
     while true do
       prev = rest
-      rest, vals, mets = term(invariant, rest, ...)
+      rest, vals, mets = term(invariant, rest, limit, ...)
       values:extend(tovector(vals))
       metas:extend(tovector(mets))
       if not vals then
         if not self.repeating and not self.option then
           return bytes
+        else
+          break
         end
       end
       if not self.repeating then
         break
       end
-      if not rest then
+      if not rest or rest == limit then
         break
       end
     end
@@ -139,7 +139,7 @@ mark = setmetatable({
   end
 }, {
   __call = function(_, term, ...)
-    if type(read) == "string" then
+    if type(term) == "string" then
       term = factor_terminal(term)
     end
     local self = setmetatable({term, apply=id}, mark)
@@ -183,7 +183,6 @@ local function tospan(nextvalue, invariant, state)
   return span(itertools.unpack(nextvalue, invariant, state))
 end
 
-
 any = setmetatable({
   __mod = mod_apply,
   __call = function(self, invariant, bytes, ...)
@@ -226,7 +225,6 @@ any = setmetatable({
 })
 
 any.__index = any
-
 
 span = setmetatable({
   __mod = mod_apply,
@@ -285,275 +283,405 @@ span = setmetatable({
 -- @return an iterable of the choices.
 local function flatten(term)
   if isgrammar(term, any) then
-    return join(map(flatten, asvector(term)))
+    return unique(join(map(flatten, asvector(term))))
   end
   return {term}
 end
 
--- Return whether `term` can start with `target.
-local function canhaveatindex(i, target, term)
-  if term == target then
-    return term
-  end
-  if isgrammar(term, span) then
-    return canhaveatindex(i, target, index(i, term))
-  end
-  if isgrammar(term, any) then
-    return search(bind(canhaveatindex, i, target), term)
-  end
-  return not isgrammar(term, terminal)
-end
-
--- Return whether `term` can have `target` at `index`.
-local function canhaveotherthanatindex(i, target, term)
-  if term == target or isgrammar(term, span) and index(i, term) == target then
-    return false
-  end
-  if isgrammar(term, any) then
-    return search(bind(canhaveotherthanatindex, i, target), term)
-  end
-  return true
-end
-
--- Return a version of `term` where each span with `target` at index `i` are
--- removed.
-local function withotherthanatindex(i, target, term)
-  if canhaveotherthanatindex(i, target, term) then
-    if isgrammar(term, any) then
-      return toany(filter(function(t)
-        return not canhaveatindex(i, target, t)
-      end, term))
-    end
-    if isgrammar(term, span) then
-      local cur = term[i > 0 or #term + i + 1]
-      term[i > 0 or #term + i + 1] = withotherthanatindex(i, target, cur)
-      if isgrammar(index(i, term), any) and #index(i, term) == 0 then
-        return any()
-      end
-    end
-    return term
-  end
-  return any()
-end
-
-local function unwrap(term)
-  while (isgrammar(term, any) or isgrammar(term, span)) and #term == 1 do
+-- Remove recurring layers of single length `any` or `span` wrappings.
+-- E.g. Transform `span(any(span(span(t))))` to `t`.
+-- @param term The grammar to refactor.
+local function unwrap(term, remove_mark)
+  while (isgrammar(term, any) or isgrammar(term, span)) and #term == 1
+    or (remove_mark and isgrammar(term, mark)) do
     term = term[1]
   end
   return term
 end
 
+-- Return a simplified `any` given an `iterable` triple.
+local function toflatany(iterable, ...)
+  return unwrap(toany(flatten(toany(unique(iterable, ...)))))
+end
 
--- create a nonterminal rule.
+-- Return the stack of left-recurring nonterminals by recursively looking the 
+-- first element of each `span` of `term`.
+-- @param term The grammar to look through.
+-- @param ignore For internal use only. *Do not provide this argument.*
+local function left_nonterminals(term, ignore)
+  ignore, term = term, ignore
+  if ignore and not term then
+    term, ignore = ignore, {}
+  end
+  if isgrammar(term, span) then
+    return #term > 0 and left_nonterminals(ignore, term[1]) or nil
+  elseif isgrammar(term, any) then
+    return tolist(join(map(bind(left_nonterminals, ignore), term)))
+  else
+    while isgrammar(term, mark) do
+      term = term[1]
+    end
+    if isgrammar(term, factor) and not ignore[term] then
+      ignore[term] = true
+      return cons(term, left_nonterminals(ignore, term:canonical()))
+    end
+  end
+end
+
+-- Return whether `origin` is left recursive.
+-- @param `origin` must be a nonterminal or a`mark` wrapping a nonterminal
+local function is_left_nonterminal(origin)
+  origin = unwrap(origin, true)
+  return contains(origin, left_nonterminals(origin:canonical()))
+end
+
+-- Return whether running `origin` will invoke a left-recursive path.
+local function is_left_recursive(origin)
+  origin = unwrap(origin, true)
+  if isgrammar(origin, factor) then
+    return is_left_nonterminal(origin)
+  elseif isgrammar(origin, span) then
+    return #origin == 0 or is_left_recursive(origin[1])
+  elseif isgrammar(origin, any) then
+    return search(function(term) return is_left_recursive(term) end, any)
+  end
+end
+
+-- Remove any left nonterminal that can occur as a first term of `term`.
+local function truncate_left_nonterminal(term)
+  assert(isgrammar(term, span) or isgrammar(term, factor),
+    "`term` must be a `factor` or `span`.: "..tostring(term))
+  if not is_left_recursive(term) then
+    return term
+  end
+  term = unwrap(term, true)
+  if isgrammar(term, factor) then
+    return span()
+  end
+  return tospan(drop(1, term))
+end
+
+-- This function is *not* the inverse of `truncate_left_nonterminal`.
+-- Remove `nonterminal` from the right side when it occurs as a last term of
+-- `term`.
+local function truncate_right_nonterminal(term, nonterminal)
+  if unwrap(term, true) == nonterminal then
+    return
+  elseif isgrammar(term, any) then
+    return toany(filter(id, map(function(t)
+        return truncate_right_nonterminal(t, nonterminal)
+      end, term)))
+  elseif isgrammar(term, span) then
+    return tospan(each(function(t, i)
+        if i == #term then
+          return truncate_right_nonterminal(t, nonterminal)
+        else
+          return t
+        end
+      end, term))
+  end
+  return term
+end
+
+-- Return a subset of `nonterminal` grammar that is guaranteed to consume a 
+-- token, representing terminating form of the left nonterminal of `origin`.
+local function toconsume(origin, ignore)
+  origin, ignore = unwrap(origin, true), ignore or {{}, {}}
+  if isgrammar(origin, terminal) then
+    return origin
+  elseif isgrammar(origin, factor) then
+    if is_left_nonterminal(origin) then
+      if ignore[1][origin] then
+        return
+      end
+      ignore[1][origin] = true
+      return toconsume(origin:canonical(), ignore)
+    end
+    return origin:canonical()
+  elseif isgrammar(origin, any) then
+    return toflatany(filter(id, map(bind(flip(toconsume), ignore), origin)))
+  elseif isgrammar(origin, span) then
+    local first = unwrap(origin[1], true)
+    if isgrammar(first, factor) then
+      if is_left_nonterminal(first) then
+        if ignore[2][first] then
+          return
+        end
+        ignore[2][first] = true
+        return toconsume(origin[1], ignore)
+      end
+      return origin
+    elseif isgrammar(first, any) then
+      -- if first element is `any` then need to expand it like.
+      -- In python vararg notation, this is the transformation:
+      -- span(any(*choices), *rest) => any(span(x, *rest) for x in choices)
+      local rest = tolist(drop(1, origin))
+      return toany(map(function(term)
+          return tospan(cons(toconsume(term, ignore), rest))
+        end, first))
+    else
+      return tospan(cons(toconsume(origin[1], ignore),
+        tolist(drop(1, origin))))
+    end
+  end
+end
+
+-- Return a subset of `nonterminal` grammar that is guaranteed to consume a 
+-- token, representing terminating form of `origin`.
+local function toterminal(origin, ignore)
+  origin, ignore = unwrap(origin, true), ignore or {{}, {}}
+  if isgrammar(origin, terminal) then
+    return origin
+  elseif isgrammar(origin, factor) then
+    if is_left_nonterminal(origin) then
+      if ignore[1][origin] then
+        return origin:factory()
+      end
+      ignore[1][origin] = true
+      return toterminal(origin:canonical(), ignore)
+    end
+    return origin
+  elseif isgrammar(origin, any) then
+    return toflatany(filter(id, map(bind(flip(toterminal), ignore), origin)))
+  elseif isgrammar(origin, span) then
+    local first = unwrap(origin[1], true)
+    if isgrammar(first, factor) then
+      if is_left_nonterminal(first) then
+        if ignore[2][first] then
+          return
+        end
+        ignore[2][first] = true
+        return tospan(cons(toterminal(origin[1], ignore),
+          tolist(drop(1, origin))))
+      end
+      return origin
+    elseif isgrammar(first, any) then
+      -- if first element is `any` then need to expand it like.
+      -- In python vararg notation, this is the transformation:
+      -- span(any(*choices), *rest) => any(span(x, *rest) for x in choices)
+      local rest = tolist(drop(1, origin))
+      return toany(map(function(term)
+          return tospan(cons(toterminal(term, ignore), rest))
+        end, first))
+    else
+      return tospan(cons(toterminal(origin[1], ignore),
+        tolist(drop(1, origin))))
+    end
+  end
+end
+
+-- Nonterminal type.
 factor = setmetatable({
+  -- Return the canonical definition of `self`, i.e. without any modifications.
   canonical = function(self)
     if not self.canon then
       self.canon = self.def()
     end
     return self.canon
   end,
-  -- Return the suffix of each span of `term` where `self` begins the
-  -- span. The suffix includes all terms except the first of the span.
-  suffixof = function(self, term)
-    if canhaveatindex(1, self, term) then
-      if self == term then
-        return span()
-      end
-      if isgrammar(term, span) then
-        return tospan(drop(1, term))
-      end
-      if isgrammar(term, any) then
-        return compose(unwrap, toany, flatten, toany)(
-          map(bind(self.suffixof, self), asvector(term)))
-      end
-      return term
+  -- Return whether `term` is left-recurring involving `self.
+  is_left_recursive = function(self, term)
+    if not is_left_recursive(term) then
+      return false
     end
-    return any()
+    return contains(self, left_nonterminals(term))
   end,
-  -- Return list of suffixes of `self` where it starts with a nonterminal
-  -- that, when expanded, recurses into itself.
-  left_suffixes = function(self)
-    if not self._left_suffixes then
-      self._left_suffixes = tolist(map(
-        compose(
-          compose(
-            bind(withotherthanatindex, -1, self),
-            bind(self.expandatindex, self, -1),
-            bind(self.suffixof, self),
-            bind(self.expandatindex, self, 1)),
-          indexof(self.canon)),
-        self:left_indices()))
-    end
-    return self._left_suffixes
-  end,
-  -- Expand each nonterminal in `term` as long as that nonterminal is not
-  -- `self`, and the first element of the span it belongs to is not `self`.
-  expandatindex = function(self, i, term)
-    local action = true
-    while action do
-      action = false
-      term = any.map(term, function(t)
-        if isgrammar(t, factor) and t ~= self then
-          local action = true
-          return t:canonical()
-        end
-        if isgrammar(t, terminal) then
-          return t
-        end
-        if isgrammar(t, span) and index(i, t) ~= self then
-          return span.map(t, function(s) return self:expandatindex(i, s) end)
-        end
-        return t
-      end)
-    end
-    return term
-  end,
-  -- Return whether `self` can start with `parent`.
-  -- Note: `factor.startswith` arguments are switched compared to `startswith`.
-  canstartwith = function(self, parent)
-    return search(bind(canhaveatindex, 1, parent), parent:expandatindex(1, self))
-  end,
-  -- Return list of sorted indices of `self` where it starts with a nonterminal
-  -- that, when expanded, recurses into itself.
+  -- Return left recurring choices in `self`, if its definition is an `any`.
   left_indices = function(self)
     if self._left_indices == nil then
-      local term = self:canonical()
-      if isgrammar(term, any) then
-        self._left_indices = tolist(filter(function(i)
-            if isgrammar(term[i], factor) then
-              return term[i]:canstartwith(self)
-            else
-              return canhaveatindex(1, self, self:expandatindex(1, term[i]))
-            end
-          end, range(#term))) or false
+      local canon = self:canonical()
+      if isgrammar(canon, any) then
+        self._left_indices = tolist(filter(function(i) return
+            self:is_left_recursive(canon[i])
+          end, range(#canon))) or false
       else
         self._left_indices = false
       end
     end
     return self._left_indices
   end,
-  -- Returns a function that, given an index, will return a grammar that is
-  -- equivalent to `canonical()`, except hiding all non-index-th
-  -- left-recursion spans.
-  factorize = function(self)
-    local indices = self:left_indices()
-    if isgrammar(self:canonical(), any) and indices then
-      return function(index)
-        local term = self.def()
-        local left, lefts = car(indices)
-        return toany(filter(function(_, i)
-            if i == left then
-              if lefts then
-                left, lefts = car(lefts)
-              end
-              return i == index
-            end
-            return true
-          end, term))
-      end
-    else
-      return self.def
-    end
-  end,
-  -- Return a list of expansion of left-recurring paths, with any 
-  -- left-recurring paths from the expansion back to `self` replaced with any().
-  -- By `terminal` it doesn't mean a simple string terminal, but meaning
-  -- running it will terminate and won't cause a stack overflow.
-  left_terminals = function(self)
-    if not self._left_terminals then
-      self._left_terminals = tolist(map(
-        compose(
-          compose(
-            bind(withotherthanatindex, 1, self),
-            bind(self.expandatindex, self, 1)),
-          indexof(self.canon)),
+  left_terms = function(self)
+    if self._left_terms == nil then
+      self._left_terms = toany(map(indexof(self:canonical()),
         self:left_indices()))
     end
-    return self._left_terminals
+    return self._left_terms
   end,
-  -- Return a grammar where:
-  --  1. Each left-recurring choice of `self` is transformed, such that:
-  --    The choices of the left recurring choice, where it left-recurses into
-  --    `self`, are removed.
-  --  2. The non-left-recurring choices are also returned as part of the grammar,
-  --  untouched.
-  prefix = function(self)
-    local term = self.def()
-    for _, l in zip(self:left_indices(), self:left_terminals()) do
-      i, t = unpack(l)
-      term[i] = t
+  factory = function(self, i)
+    self._factory, i = self._factory or {}, i or false
+    if not self._factory[i] then
+      local canon = self:canonical()
+      if not isgrammar(canon, any) then
+        self._factory[i] = canon
+      elseif i then
+        self._factory[i] = canon[i]
+      else
+        self._factory[i] = toany(filter(id,
+          each(function(term, j) return
+            not contains(j, self:left_indices()) and term or nil
+          end, canon)))
+      end
     end
-    return toany(flatten(term))
+    return self._factory[i]
   end,
-  __call = function(self, invariant, bytes, state)
-    -- if not bytes then
-    --   return bytes
-    -- end
-    if not self.factory then
-      self.factory = self:factorize()
-    end
-    if not self:left_indices() then
-      return self.canon(invariant, bytes, state)
-    end
-    if not self.empty then
-      self.empty = self.factory()
-    end
-    if not state or state.factor == self then
-      if not bytes then
-        return bytes, nil
-      end
-      if state and state.path then
-        local i
-        i, state.path = car(state.path)
-        return self.factory(i)(invariant, bytes, state)
-      elseif not state then
-        state = {factor=self, cache={}}
-        local rest, prefix, meta = self:prefix()(invariant, bytes, state)
-
-        if not prefix then
-          return self.empty(invariant, bytes, state)
-        end
-
-        if not rest then
-          local independent = toany(flatten(toany(self:left_terminals())))
-          return independent(invariant, bytes, state)
-        end
-        local values
-        rest = bytes
-        state.path = list()
-        while rest do
-          values = nil
-          local suffix, i = search(function(suffix)
-            rest, values = suffix(invariant, rest, state)
-            return values
-          end, self:left_suffixes())
-          if not i then
-            rest, values = self.empty(invariant, rest, state)
+  -- Return terminals in `term` that occur after `self`.
+  -- @param term A left recurring path that will recur into `self`.
+  left_suffix = function(self, term)
+    term = unwrap(term)
+    if isgrammar(term, span) then      
+      local first = unwrap(term[1], true)
+      if isgrammar(first, any) then
+        local rest = tolist(drop(1, origin))
+        return toflatany(filter(id, map(function(term)
+            return self:left_suffix(tospan(cons(term, rest)))
+          end, filter(bind(self.is_left_recursive, self), first))))
+      elseif self:is_left_recursive(first) then
+        if is_left_recursive(term[2]) then
+          if isgrammar(unwrap(term[2], true), factor) then
+            return tospan(cons(term[2]:factory(), tolist(drop(2, term))))
           end
-          if values then
-            state.path = list.insert(state.path,
-              i ~= nil and index(i, self:left_indices()) or nil)
-          else
-            break
-          end
+          -- Untested case.
+          return toconsume(tospan(tolist(drop(2, term))))
         end
-        return self(invariant, bytes, state)
+        return tospan(tolist(drop(1, term)))
       end
+    elseif isgrammar(term, any) then
+      return toflatany(filter(id, map(function(t)
+        return self:left_suffix(t)
+      end, term)))
+    elseif isgrammar(term, factor) then
+      if term == self then
+        return
+      end
+      return self:left_suffix(term:canonical())
     else
-      return self.canon(invariant, bytes, state)
+      return
     end
+  end,
+  -- Return terminals in left recurring choices that can occur after `self`,
+  -- if its definition is an `any`.
+  left_suffixes = function(self)
+    if not self._left_suffixes then
+      self._left_suffixes = tolist(map(
+        compose(bind(self.left_suffix, self), indexof(self.canon)),
+        self:left_indices()))
+    end
+    return self._left_suffixes
+  end,
+  initialize = function(self, rest, values, metas)
+    return rest, self.init(values, metas)
+  end,
+  execute = function(self, invariant, bytes, limit, paths)
+    if not self:left_indices() then
+      local canon = self:canonical()
+      return canon(invariant, bytes, limit, paths)
+    elseif paths[bytes] then
+      local i, step, lim
+      step, paths[bytes] = car(paths[bytes])
+      i, lim = unpack(step)
+      paths[bytes] = paths[bytes] or cons({nil, lim})
+      return self:factory(i)(invariant, bytes, lim, paths)
+    end
+    local rest, values, metas
+    rest, values = self.consume(invariant, bytes, limit, paths)
+    if not values then
+      return bytes
+    end
+    metas = cons({bytes=bytes, rest=rest})
+    while rest and rest ~= limit do
+      local from = rest
+      local suffix, i = search(function(suffix)
+          rest, values = suffix(invariant, rest, limit, paths)
+          return values
+        end, self:left_suffixes())
+      if i then
+        metas = list.insert(metas, {bytes=from, rest=rest})
+      else
+        break
+      end
+    end
+    local top, path = self
+    while cdr(metas) do
+      local meta = car(metas)
+      local _, i = search(function(suffix)
+          rest, values = suffix(invariant, meta.bytes, meta.rest, paths)
+          return values and rest == meta.rest
+        end, top:left_suffixes())
+      assert(i)
+      local j = index(i, top:left_indices())
+      local term = top:factory(j)
+      if #truncate_left_nonterminal(term) > 0 then
+        metas = cdr(metas)
+      end
+      path = list.insert(path, {j, meta.rest, top})
+      top = car(left_nonterminals(term))
+    end
+    while metas do
+      local meta = car(metas)
+      local indices = tovector(filter(function(i)
+          return not is_left_recursive(top.canon[i])
+            or isgrammar(unwrap(top.canon[i], true), factor)
+        end, range(#top:canonical())))
+      table.sort(indices, function(i, j)
+          return is_left_recursive(top.canon[j])
+        end)
+      local i = search(function(i)
+        local term = top.canon[i]
+        local consume
+        if isgrammar(term, factor) then
+          term.consume = term.consume
+            or truncate_right_nonterminal(toconsume(term), term)
+          consume = term.consume
+        else
+          consume = toconsume(term)
+        end
+        rest, values = consume(invariant, meta.bytes, meta.rest, paths)
+        return values and rest == meta.rest
+      end, indices)
+      assert(i)
+      local term = top:factory(i)
+      if not isgrammar(unwrap(term, true), factor) or not is_left_recursive(term) then
+        metas = cdr(metas)
+      end
+      path = list.insert(path, {i, meta.rest, top})
+      if is_left_recursive(term) then
+        top = car(left_nonterminals(term))
+      end
+    end
+    paths[bytes] = list.reverse(path)
+    -- print(self, limit, paths[bytes])
+    return self(invariant, bytes, limit, paths)
+  end,
+  __call = function(self, invariant, bytes, limit, paths)
+    assert(not limit or isinstance(limit, list))
+    self.canon = self:canonical()
+    self.consume = self.consume or truncate_right_nonterminal(
+      toconsume(self), self)
+    paths = paths or {}
+    self.cache = self.cache or {}
+    if not bytes or bytes == limit then
+      return bytes
+    end
+    if not self.cache[bytes] then
+      self.cache[bytes] = {
+        path=paths[bytes],
+        self:initialize(self:execute(invariant, bytes, limit, paths))
+      }
+    end
+    return unpack(self.cache[bytes], 1, 3)
   end,
   __tostring = function(self)
     return tostring(self.name)
   end
 }, {
-  __call = function(_, name, canonical)
-    return setmetatable({name=name, def=canonical}, factor)
+  __call = function(_, name, canonical, init)
+    return setmetatable({name=name, def=canonical, init=init or id}, factor)
   end,  
   __tostring = function()
     return "factor"
   end
 })
+
 factor.__index = factor
 
 return {
@@ -564,14 +692,11 @@ return {
   any=any,
   grammar=grammar,
   mark=mark,
-  -- Terminal=Terminal,
-  -- NonTerminal=NonTerminal,
   ismark=ismark,
   isgrammar=isgrammar,
   factor=factor,
   factor_terminal=factor_terminal,
   filter=filter,
-  -- ExpectedNonTerminalException=ExpectedNonTerminalException,
   ParseException=ParseException,
   GrammarException=GrammarException
 }

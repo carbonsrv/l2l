@@ -9,7 +9,7 @@ local mark = grammar.mark
 local repeating = grammar.repeating
 
 char = factor("char", function()
-    return any(a, b, "d", span(char, "e"), q, "z")
+    return any(span(char, "e"), a, b, "d", q, "z")
 end)
 
 
@@ -26,8 +26,12 @@ q = factor("q", function()
   return any(span(char, "A ", "D"), char)
 end)
 
-local rest, values, metas = char(reader.environ("bbabe"))
+-- char(a(char(a(b(b("b"), "b"), "a")), "a")) -- bbba
+-- char(b(char(b(char(b("b")), b("b"))), b("b")))
 
+local rest, values, metas = char(reader.environ("bbb"))
+
+---------------------------------------char(char(a(char(b(char("b"), "b")), "a")), "e")
 print(rest, values, metas)
 -- local bytes = itertools.tolist("12345")
 -- local environment = reader.environ(bytes)
