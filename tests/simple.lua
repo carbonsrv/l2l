@@ -26,7 +26,7 @@ q = factor("q", function()
   return any(span(char, "A ", "D"), char)
 end)
 
-local rest, values, metas = char(reader.environ("bbbb"))
+local rest, values, metas = char(reader.environ("bbabe"))
 
 print(rest, values, metas)
 -- local bytes = itertools.tolist("12345")

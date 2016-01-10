@@ -304,21 +304,6 @@ local function canhaveatindex(i, target, term)
   return not isgrammar(term, terminal)
 end
 
--- Return whether `term` can end with `target.
-local function canendwith(target, term)
-  if term == target then
-    return term
-  end
-  if isgrammar(term, span) then
-    return canendwith(target, term[#term])
-  end
-  if isgrammar(term, any) then
-    return search(bind(canendwith, target), term)
-  end
-  return not isgrammar(term, terminal)
-end
-
-
 -- Return whether `term` can have `target` at `index`.
 local function canhaveotherthanatindex(i, target, term)
   if term == target or isgrammar(term, span) and index(i, term) == target then
@@ -340,7 +325,8 @@ local function withotherthanatindex(i, target, term)
       end, term))
     end
     if isgrammar(term, span) then
-      term[i > 0 or #term + i + 1] = withotherthanatindex(i, target, target)
+      local cur = term[i > 0 or #term + i + 1]
+      term[i > 0 or #term + i + 1] = withotherthanatindex(i, target, cur)
       if isgrammar(index(i, term), any) and #index(i, term) == 0 then
         return any()
       end
@@ -533,25 +519,22 @@ factor = setmetatable({
           return independent(invariant, bytes, state)
         end
         local values
-        local matching = true
         rest = bytes
         state.path = list()
-        while matching and rest do
-          matching = nil
-          for i, suffix in tonext(self:left_suffixes()) do
+        while rest do
+          values = nil
+          local suffix, i = search(function(suffix)
             rest, values = suffix(invariant, rest, state)
-            if values then
-              matching = true
-              state.path = list.insert(state.path, i)
-              break
-            end
-          end
-          if not matching then
+            return values
+          end, self:left_suffixes())
+          if not i then
             rest, values = self.empty(invariant, rest, state)
-            if values then
-              matching = true
-              state.path = list.insert(state.path, nil)
-            end
+          end
+          if values then
+            state.path = list.insert(state.path,
+              i ~= nil and index(i, self:left_indices()) or nil)
+          else
+            break
           end
         end
         return self(invariant, bytes, state)
