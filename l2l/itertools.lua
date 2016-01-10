@@ -18,6 +18,17 @@ local function match(...)
   end
 end
 
+-- Return the calling of `f` with the given arguments.
+-- @param f Function to call.
+-- @param ... The arguments to call with.
+local function apply(f, ...)
+  return f(...)
+end
+
+local function isinstance(value, mt)
+  return getmetatable(value) == mt
+end
+
 
 local function index(t)
   return function(value)
@@ -629,10 +640,10 @@ end
 local function range(start_or_stop, stop, step)
   local start = (stop and (start_or_stop or 1)) or 1
   stop = stop or start_or_stop
-  step = step or (start <= stop and 1 or -1)
+  step = step or (stop and start <= stop and 1 or -1)
   return function(_, index)
     local value = start + index * step
-    if not stop or value <= stop then
+    if not stop or value <= stop or stop == nil then
       return index + 1, start + index * step
     end
   end, step, 0
@@ -733,25 +744,15 @@ end
 
 -- Returns an identity function that, for the same `list` instance, returns
 -- the same reference, rather than a new reference if it's wrapped in a
--- `tonext`. For non-`list`s, returns the same arguments. Optionally provide
--- `f` to be applied to each value. Used for `drop` and `span`, so that:
--- `rawtostring(drop(1, l))` == `rawtostring(cdr(l))`.
+-- `tonext`. For non-`list`s, returns the same arguments. Used for `span`,
+-- so that:
+-- `rawtostring(select(2, span(1, l)))` == `rawtostring(cdr(l))`.
 -- @param target The object to identify.
--- @param f The function to apply to each value of `target`.
-local function identify(target, _, _, f)
+local function identify(target)
   local islist = getmetatable(target) == list
   return function(nextvalue, invariant, index)
     if islist and invariant and finalized(invariant[index]) then
-      if f then
-        invariant, index = f(invariant, index)
-      end
       return invariant[index]
-    end
-    if f then
-      nextvalue, invariant, index = tonext(nextvalue, invariant, index)
-      return function(...)
-        return nextvalue(f(...))
-      end, invariant, index
     end
     return nextvalue, invariant, index
   end
@@ -761,7 +762,7 @@ local function span(n, nextvalue, invariant, state)
   if n == 0 then
     return nil, tolist(nextvalue, invariant, state)
   end
-  local identity = identify(nextvalue, invariant, state)
+  local identity = identify(nextvalue)
 
   local first = {}
   local value
@@ -810,34 +811,53 @@ local function take(n, nextvalue, invariant, state)
 end
 
 
-local function drop(n, nextvalue, invariant, state)
+-- Drop the first `n` values of an iterable. `n` can also be a function,
+-- in that case, drop while `n(index)`.
+-- It is usually lazy, but if `nextvalue` is a list, it will drop the
+-- first `n` elements immediately, so as to return the identical pointer.
+-- in the same list, by advancing `n` elements.
+-- @param n The number of elements to drop, or a function that returns true
+--          while the element should still be dropped.
+local function drop(n, nextvalue, invariant, origin)
   if n == 0 then
-    return nextvalue, invariant, state
+    return nextvalue, invariant, origin
   end
-  local count, value = 0
-  local identity = identify(nextvalue, invariant, state,
-    function(_, index)
-      if type(n) == "number" then
-        while count < n and index do
-          index, value = nextvalue(invariant, index)
-          count = count + 1
-        end
-      else
-        local previous
-        repeat
-          previous = index
-          index, value = nextvalue(invariant, index)
-          if not index then
-            break
-          end
-        until not n(value, index)
-        n = 0
-        index = previous
+
+  local islist = isinstance(nextvalue, list)
+
+  nextvalue, invariant, origin = tonext(nextvalue, invariant, origin)
+
+  local count = 0
+
+  local function move(current)
+    if type(n) == "number" then
+      while count < n and index do
+        current, value = nextvalue(invariant, current)
+        count = count + 1
       end
-      return invariant, index
-    end)
-  nextvalue, invariant, state = tonext(nextvalue, invariant, state)
-  return identity(nextvalue, invariant, state)
+    else
+      local state = origin
+      repeat
+        current = state
+        state = nextvalue(invariant, state)
+      until not n(state)
+      n = 0
+    end
+    return current
+  end
+
+  if islist then
+    return invariant[move(origin)]
+  end
+
+  return function(current, index)
+    current[index] = move(current[index])
+    local value
+    current[index + 1], value = nextvalue(invariant, current[index])
+    if current[index + 1] then
+      return index + 1, value
+    end
+  end, {[0]=origin}, 0
 end
 
 local function scan(f, initial, nextvalue, invariant, state)
@@ -957,15 +977,26 @@ local function rawtostring(obj)
   return text
 end
 
--- Return the calling of `f` with the given arguments.
--- @param f Function to call.
--- @param ... The arguments to call with.
-local function apply(f, ...)
-  return f(...)
-end
-
-local function isinstance(value, mt)
-  return getmetatable(value) == mt
+local function unique(nextvalue, invariant, state)
+  nextvalue, invariant, state = tonext(nextvalue, invariant, state)
+  return function(current, index)
+    local state = current[index]
+    while true do
+      state, value = nextvalue(invariant, state)
+      current[index + 1] = state
+      if current[index + 1] == nil then
+        return
+      end
+      if value == nil and not current.seen_nil then
+        current.seen_nil = true
+        return index + 1, value
+      end
+      if not current.seen[value] then
+        current.seen[value] = true
+        return index + 1, value
+      end
+    end
+  end, {[0]=state, seen={}, seen_nil}, state
 end
 
 return {
@@ -1020,6 +1051,7 @@ return {
   tonext = tonext,
   tovector=tovector,
   traverse=traverse,
+  unique=unique,
   unlift=unlift,
   unpack = _unpack,
   vector=vector,
