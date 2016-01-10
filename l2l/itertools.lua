@@ -30,7 +30,7 @@ local function isinstance(value, mt)
 end
 
 
-local function index(t)
+local function indexof(t)
   return function(value)
     return t[value]
   end
@@ -163,17 +163,22 @@ local function tonext(obj, invariant, state)
   end
 end
 
-local function tovector(nextvalue, invariant, state)
-  local t = {}
+local function asvector(nextvalue, invariant, state)
   nextvalue, invariant, state = tonext(nextvalue, invariant, state)
-  if nextvalue == pairs(t) then
+  if nextvalue == next then
     nextvalue, invariant, state = ipairs(invariant)
   end
-  for i, value in nextvalue, invariant, state do
+  return nextvalue, invariant, state
+end
+
+local function tovector(nextvalue, invariant, state)
+  local t = {}
+  for i, value in asvector(nextvalue, invariant, state) do
     t[i] = value
   end
   return t
 end
+
 
 local pair = function(t)
   return setmetatable(t, list)
@@ -584,6 +589,9 @@ queue = setmetatable({
       return value
     end
   end,
+  count = function(self, obj)
+    return list.count(self[2])
+  end,
   __ipairs = function(self)
     return list.next, {[0]=self[2]}, 0
   end,
@@ -676,7 +684,7 @@ local function join(nextvalue, invariant, state)
     local value
     current[3], value = current[1](current[2], current[3])
 
-    if not current[3] then
+    while not current[3] and current[0] do
       local cnext, cinv, cstate
       current[0], cnext, cinv, cstate = nextvalue(invariant, current[0])
       current[1], current[2], current[3] = tonext(cnext, cinv, cstate)
@@ -685,7 +693,7 @@ local function join(nextvalue, invariant, state)
     if current[3] then
       return index + 1, value
     end
-  end, {[0]=state, tonext(cnext, cinv, cstate)}, 0
+  end, {[0]=state, asvector(cnext, cinv, cstate)}, 0
 end
 
 local function filter(f, nextvalue, invariant, state)
@@ -831,7 +839,7 @@ local function drop(n, nextvalue, invariant, origin)
 
   local function move(current)
     if type(n) == "number" then
-      while count < n and index do
+      while count < n do
         current, value = nextvalue(invariant, current)
         count = count + 1
       end
@@ -885,12 +893,17 @@ end
 -- @param start first index.
 -- @param finish second index
 local function slice(start, finish, nextvalue, invariant, state)
-  nextvalue, invariant, state = tonext(nextvalue, invariant, state)
+  nextvalue, invariant, state = asvector(nextvalue, invariant, state)
 
-  if finish and finish <= 0 then
-    finish = #tovector(nextvalue, invariant, state) + finish
+  if finish and finish <= 0 or start and start <= 0 then
+    local count = #tovector(nextvalue, invariant, state)
+    if finish and finish <= 0 then
+      finish = count + finish + 1
+    end
+    if start and start <= 0 then
+      start = count + start + 1
+    end
   end
-
   return function(cache, index)
     local value
     state, value = nextvalue(invariant, cache[index])
@@ -904,6 +917,11 @@ local function slice(start, finish, nextvalue, invariant, state)
   end, {[0] = state}, 0
 end
 
+local function index(i, nextvalue, invariant, state)
+  i = i or 1
+  nextvalue, invariant, state = slice(i, i, nextvalue, invariant, state)
+  return select(2, nextvalue(invariant, state))
+end
 
 local function zip(...)
   local invariants = {}
@@ -1001,7 +1019,6 @@ end
 
 return {
   apply=apply,
-  index=index,
   bind=bind,
   cadr = cadr,
   car=car,
@@ -1023,6 +1040,8 @@ return {
   foreach=foreach,
   foreacharg=foreacharg,
   id=id,
+  indexof=indexof,
+  index=index,
   isinstance=isinstance,
   iterate=iterate,
   join=join,
@@ -1050,6 +1069,7 @@ return {
   tolist=tolist,
   tonext = tonext,
   tovector=tovector,
+  asvector=asvector,
   traverse=traverse,
   unique=unique,
   unlift=unlift,
