@@ -652,8 +652,8 @@ end
 -- `nextvalue, invariant, state`.
 local function join(nextvalue, invariant, state)
   nextvalue, invariant, state = tonext(nextvalue, invariant, state)
-  local collection
-  state, collection = nextvalue(invariant, state)
+  local cnext, cinv, cstate
+  state, cnext, cinv, cstate  = nextvalue(invariant, state)
   return function(current, index)
     if not current[0] then
       return
@@ -662,15 +662,15 @@ local function join(nextvalue, invariant, state)
     current[3], value = current[1](current[2], current[3])
 
     if not current[3] then
-      local collection
-      current[0], collection = nextvalue(invariant, current[0])
-      current[1], current[2], current[3] = tonext(collection)
+      local cnext, cinv, cstate
+      current[0], cnext, cinv, cstate = nextvalue(invariant, current[0])
+      current[1], current[2], current[3] = tonext(cnext, cinv, cstate)
       current[3], value = current[1](current[2], current[3])
     end
     if current[3] then
       return index + 1, value
     end
-  end, {[0]=state, tonext(collection)}, 0
+  end, {[0]=state, tonext(cnext, cinv, cstate)}, 0
 end
 
 local function filter(f, nextvalue, invariant, state)
