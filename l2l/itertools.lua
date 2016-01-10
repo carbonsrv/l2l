@@ -154,7 +154,11 @@ end
 
 local function tovector(nextvalue, invariant, state)
   local t = {}
-  for i, value in tonext(nextvalue, invariant, state) do
+  nextvalue, invariant, state = tonext(nextvalue, invariant, state)
+  if nextvalue == pairs(t) then
+    nextvalue, invariant, state = ipairs(invariant)
+  end
+  for i, value in nextvalue, invariant, state do
     t[i] = value
   end
   return t
@@ -918,15 +922,16 @@ local function concat(separator, nextvalue, invariant, state)
     return list.concat(nextvalue, separator)
   end
   nextvalue, invariant, state = tonext(nextvalue, invariant, state)
-  local text, value
+  local text, value = ""
   state, text = nextvalue(invariant, state)
+  text = tostring(text or "")
   if state then
     while true do
       state, value = nextvalue(invariant, state)
       if not state then
         break
       end
-      text = text .. separator .. value
+      text = text .. separator .. tostring(value or "")
     end
   end
   return text
