@@ -588,6 +588,8 @@ factor = setmetatable({
       return bytes
     end
     metas = cons({bytes=bytes, rest=rest})
+
+    -- Lookahead until end of input or no more valid parse.
     while rest and rest ~= limit do
       local from = rest
       local suffix, i = search(function(suffix)
@@ -600,6 +602,8 @@ factor = setmetatable({
         break
       end
     end
+
+    -- Construct a path for each suffix.
     local top, path = self
     while cdr(metas) do
       local meta = car(metas)
@@ -616,17 +620,23 @@ factor = setmetatable({
       path = list.insert(path, {j, meta.rest, top})
       top = car(left_nonterminals(term))
     end
+
+    -- Find the final step for the prefix.
     while metas do
       local meta = car(metas)
+      local canon = top:canonical()
+      canon = isgrammar(canon, any) and canon or any(canon)
       local indices = tovector(filter(function(i)
           return not is_left_recursive(top.canon[i])
             or isgrammar(unwrap(top.canon[i], true), factor)
-        end, range(#top:canonical())))
+        end, range(#canon)))
+      -- This is the prefix. Prioritise non-left recursive terms.
       table.sort(indices, function(i, j)
-          return is_left_recursive(top.canon[j])
+          return is_left_recursive(canon[j])
         end)
+      -- Find the actual step by matching each branch.
       local i = search(function(i)
-        local term = top.canon[i]
+        local term = canon[i]
         local consume
         if isgrammar(term, factor) then
           term.consume = term.consume
@@ -640,7 +650,9 @@ factor = setmetatable({
       end, indices)
       assert(i)
       local term = top:factory(i)
-      if not isgrammar(unwrap(term, true), factor) or not is_left_recursive(term) then
+      -- Terminate only if the selected step is not a proxy nonterminal.
+      if not isgrammar(unwrap(term, true), factor)
+          or not is_left_recursive(term) then
         metas = cdr(metas)
       end
       path = list.insert(path, {i, meta.rest, top})
