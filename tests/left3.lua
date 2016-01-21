@@ -42,5 +42,5 @@ a {(1) (1) (1) (1) (1) -}
 ]]--
 local environment = reader.environ(bytes)
 
-print(a(environment, bytes))
+print(itertools.show(a(environment, bytes)))
 -- return a(environment, bytes)

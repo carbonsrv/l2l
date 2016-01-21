@@ -46,6 +46,17 @@ local GrammarException =
 
 local mark, span, any, terminal, factor
 
+local function memoize(f, hash)
+  local cache = {}
+  hash = hash or id
+  return function(argument, ...)
+    if not cache[argument] or ... then
+      cache[argument] = {f(argument, ...)}
+    end
+    return unpack(cache[argument])
+  end
+end
+
 local function ismark(obj, flag)
   return getmetatable(obj) == mark and (not flag or obj[flag])
 end
@@ -74,13 +85,21 @@ local function factor_terminal(value, f)
     if not cache[bytes] then
       -- Reduce calls to `span` and `concat` by checking next byte.
       if bytes and string.byte(bytes[1]) ~= string.byte(value) then
-        return bytes
-      end
-      local first, rest = itertools.span(count, bytes)
-      if table.concat(first, "") == value then
-        cache[bytes] = {rest, list(value), list(Meta(bytes, rest))}
-      elseif bytes then
         cache[bytes] = {bytes}
+      elseif count == 1 then
+        local first, rest = car(bytes)
+        if value == car(bytes) then
+          cache[bytes] = {rest, list(value), list(Meta(bytes, rest))}
+        elseif bytes then
+          cache[bytes] = {bytes}
+        end
+      else
+        local first, rest = itertools.span(count, bytes)
+        if table.concat(first, "") == value then
+          cache[bytes] = {rest, list(value), list(Meta(bytes, rest))}
+        elseif bytes then
+          cache[bytes] = {bytes}
+        end
       end
     end
     return unpack(cache[bytes], 1, 3)
@@ -101,13 +120,24 @@ local repeating = "repeating"
 mark = setmetatable({
   __mod = mod_apply,
   __call = function(self, invariant, bytes, limit, ...)
-    local term, values, metas, rest = self[1], queue(), queue(), bytes
+    local term, rest, values, metas = self[1], bytes, {}, {}
     local ok, value, meta, prev
     while true do
       prev = rest
       rest, vals, mets = term(invariant, rest, limit, ...)
-      values:extend(tovector(vals))
-      metas:extend(tovector(mets))
+      if not self.repeating then
+        values = vals
+        metas = mets
+      else
+        if vals then
+          for i, value in ipairs(vals) do
+            table.insert(values, value)
+          end
+          for i, value in ipairs(mets) do
+            table.insert(metas, value)
+          end
+        end
+      end
       if not vals then
         if not self.repeating and not self.option then
           return bytes
@@ -178,7 +208,6 @@ local function toany(nextvalue, invariant, state)
   return any(itertools.unpack(nextvalue, invariant, state))
 end
 
-
 local function tospan(nextvalue, invariant, state)
   return span(itertools.unpack(nextvalue, invariant, state))
 end
@@ -228,26 +257,37 @@ any.__index = any
 
 span = setmetatable({
   __mod = mod_apply,
-  __call = function(self, invariant, bytes, ...)
-    local rest, values, metas = bytes, queue(), queue()
-    for _, term in ipairs(self) do
-      if term then
-        local prev, vals, mets = rest
-        rest, vals, mets = term(invariant, rest, ...)
-        if not vals
-            and not term.option
-            and not term.repeating then
-          return bytes
-        end
-        if ismark(term, peek) then
-          rest = prev
-        elseif not ismark(read, skip) then
-          values:extend(tovector(vals))
-          metas:extend(tovector(mets))
+  __call = function(self, invariant, bytes, limit, ...)
+    local rest, values, metas = bytes, {}, {}
+    if not bytes or bytes == limit then
+      return bytes
+    end
+    self.cache = self.cache or {}
+    if not self.cache[bytes] then
+      for _, term in ipairs(self) do
+        if term then
+          local prev, vals, mets = rest
+          rest, vals, mets = term(invariant, rest, limit, ...)
+          if not vals
+              and not term.option
+              and not term.repeating then
+            return bytes
+          end
+          if ismark(term, peek) then
+            rest = prev
+          elseif not ismark(read, skip) then
+            for i, value in ipairs(vals) do
+              table.insert(values, value)
+            end
+            for i, value in ipairs(mets) do
+              table.insert(metas, value)
+            end
+          end
         end
       end
+      self.cache[bytes] = {rest, self.apply(values, metas, bytes)}
     end
-    return rest, self.apply(values, metas, bytes)
+    return unpack(self.cache[bytes], 1, 3)
   end,
   __tostring = function(self)
     return "span("..concat(", ", map(show, asvector(self)))..")"
@@ -270,6 +310,7 @@ span = setmetatable({
       end,
       itertools.filter(id, {...}))), span)
     self.apply = id
+    self.cache = {}
     return self
   end,
   __tostring = function()
@@ -298,6 +339,8 @@ local function unwrap(term, remove_mark)
   end
   return term
 end
+
+unwrap = memoize(unwrap)
 
 -- Return a simplified `any` given an `iterable` triple.
 local function toflatany(iterable, ...)
@@ -328,12 +371,16 @@ local function left_nonterminals(term, ignore)
   end
 end
 
+left_nonterminals = memoize(left_nonterminals)
+
 -- Return whether `origin` is left recursive.
 -- @param `origin` must be a nonterminal or a`mark` wrapping a nonterminal
 local function is_left_nonterminal(origin)
   origin = unwrap(origin, true)
   return contains(origin, left_nonterminals(origin:canonical()))
 end
+
+is_left_nonterminal = memoize(is_left_nonterminal, unwrap)
 
 -- Return whether running `origin` will invoke a left-recursive path.
 local function is_left_recursive(origin)
@@ -343,9 +390,11 @@ local function is_left_recursive(origin)
   elseif isgrammar(origin, span) then
     return #origin == 0 or is_left_recursive(origin[1])
   elseif isgrammar(origin, any) then
-    return search(function(term) return is_left_recursive(term) end, any)
+    return search(is_left_recursive, any)
   end
 end
+
+is_left_recursive = memoize(is_left_recursive, unwrap)
 
 -- Remove any left nonterminal that can occur as a first term of `term`.
 local function truncate_left_nonterminal(term)
@@ -360,6 +409,8 @@ local function truncate_left_nonterminal(term)
   end
   return tospan(drop(1, term))
 end
+
+truncate_left_nonterminal = memoize(truncate_left_nonterminal)
 
 -- This function is *not* the inverse of `truncate_left_nonterminal`.
 -- Remove `nonterminal` from the right side when it occurs as a last term of
@@ -426,6 +477,8 @@ local function toconsume(origin, ignore)
   end
 end
 
+toconsume = memoize(toconsume)
+
 -- Return a subset of `nonterminal` grammar that is guaranteed to consume a 
 -- token, representing terminating form of `origin`.
 local function toterminal(origin, ignore)
@@ -476,6 +529,7 @@ factor = setmetatable({
   canonical = function(self)
     if not self.canon then
       self.canon = self.def()
+      self.kind = getmetatable(self.canon)
     end
     return self.canon
   end,
@@ -568,6 +622,24 @@ factor = setmetatable({
     end
     return self._left_suffixes
   end,
+  -- Return alternatives that are possible for a prefix, prioritise
+  -- non-left recursion.
+  left_prefix_indices = function(self)
+    if not self._left_prefix_indices then
+      local canon = self:canonical()
+      assert(self.kind == any)
+      self._left_prefix_indices = tovector(filter(function(i)
+          return not is_left_recursive(canon[i])
+            or isgrammar(unwrap(canon[i], true), factor)
+        end, range(#canon)))
+
+      -- This is the prefix. Prioritise non-left recursive terms.
+      table.sort(self._left_prefix_indices, function(i, j)
+          return is_left_recursive(canon[j])
+        end)
+    end
+    return self._left_prefix_indices
+  end,
   initialize = function(self, rest, values, metas)
     return rest, self.init(values, metas)
   end,
@@ -625,15 +697,10 @@ factor = setmetatable({
     while metas do
       local meta = car(metas)
       local canon = top:canonical()
-      canon = isgrammar(canon, any) and canon or any(canon)
-      local indices = tovector(filter(function(i)
-          return not is_left_recursive(top.canon[i])
-            or isgrammar(unwrap(top.canon[i], true), factor)
-        end, range(#canon)))
-      -- This is the prefix. Prioritise non-left recursive terms.
-      table.sort(indices, function(i, j)
-          return is_left_recursive(canon[j])
-        end)
+      if top.kind ~= any then
+        error("Not Implemented")
+      end
+      local indices = top:left_prefix_indices()
       -- Find the actual step by matching each branch.
       local i = search(function(i)
         local term = canon[i]
@@ -661,7 +728,6 @@ factor = setmetatable({
       end
     end
     paths[bytes] = list.reverse(path)
-    -- print(self, limit, paths[bytes])
     return self(invariant, bytes, limit, paths)
   end,
   __call = function(self, invariant, bytes, limit, paths)

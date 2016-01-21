@@ -34,10 +34,26 @@ end)
 local bytes = itertools.tolist("1-(1-9*(7-3))*(4-7)*7")
 local environment = reader.environ(bytes)
 
+local t = "1-(1-9*(7-3))*(4-7)*7"
 
--- print(read_expression(reader.environ("1-(1-9*(7-3))*(4-7)*7"))) -- why fail?
-print(read_expression(reader.environ("1-9*(7-3)")))
--- print(read_factor(reader.environ("(7-3)")))
--- print(read_factor(reader.environ("(7-3)")))
--- return read_expression(environment, bytes)
+local repeated = itertools.repeated
+local take = itertools.take
+local tovector = itertools.tovector
+local show = itertools.show
+-- luajit 210 lua 74 lines per second
 
+-- 500, takes 0.004 second in lua, 0.66 seconds in luajit - 165x slow.
+-- 2.4 seconds in lua.
+-- local text = table.concat(tovector(take(500, repeated(t))), "+")
+
+local text = table.concat(tovector(take(20, repeated(t))), "+")
+print(#text)
+local profile = require("l2l.profile")
+profile.profile(function() 
+    -- print(text)
+    local _, values, meta = read_expression(reader.environ(text))
+    -- print(itertools.tolist(values))
+    -- print(table.concat(tovector(take(400, repeated(t))), "+"))
+end)
+
+print(#text)

@@ -17,6 +17,7 @@ local traverse = itertools.traverse
 local show = itertools.show
 local match = itertools.match
 local join = itertools.join
+local rawtostring = itertools.rawtostring
 
 local EOFException =
   exception.Exception("EOFException",
@@ -78,7 +79,7 @@ local function matchreadmacro(_R, byte)
 end
 local concat = itertools.concat
 local function Meta(bytes, rest, children)
-  return {bytes=concat("", bytes), rest=concat("", rest), children=children}
+  return {bytes=bytes, rest=rest, children=children}
 end
 
 local function nextreadmacro(invariant, bytes)

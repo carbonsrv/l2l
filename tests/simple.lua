@@ -29,7 +29,7 @@ end)
 -- char(a(char(a(b(b("b"), "b"), "a")), "a")) -- bbba
 -- char(b(char(b(char(b("b")), b("b"))), b("b")))
 
-local rest, values, metas = char(reader.environ("bbb"))
+local rest, values, metas = char(reader.environ("bbababababb"))
 
 ---------------------------------------char(char(a(char(b(char("b"), "b")), "a")), "e")
 print(rest, values, metas)
