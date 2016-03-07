@@ -25,15 +25,24 @@ local _P = ">> "
 local function repl()
   print(";; Welcome to Lisp-To-Lua REPL!")
   print(";; Type '(print \"hello world!\") to start.")
+  print(";; Type '(os.exit)' to exit.")
   while true do
     local str = ""
     local form = nil
     local ok = false
     local stream = nil
-    io.stdout:write(_P)
+    if not linenoise.line then
+      io.stdout:write(_P)
+    end
     while ok == false do
-      local line = io.stdin:read("*line*")
-      if line == nil then
+      local line, ln_err
+      if linenoise.line then
+        line, ln_err = linenoise.line(_P)
+        linenoise.addHistory(line)
+      else
+        line = io.stdin:read("*line*")
+      end
+      if line == nil or ln_err then
         os.exit()
       end
       str = str .." ".. (line or "")
