@@ -31,12 +31,12 @@ local function repl()
     local form = nil
     local ok = false
     local stream = nil
-    if not linenoise.line then
+    if not linenoise then
       io.stdout:write(_P)
     end
     while ok == false do
       local line, ln_err
-      if linenoise.line then
+      if linenoise then
         line, ln_err = linenoise.line(_P)
         linenoise.addHistory(line)
       else
