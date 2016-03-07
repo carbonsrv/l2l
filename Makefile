@@ -7,6 +7,10 @@ repl:
 
 carbon_app:
 	zip -r l2l.zip l2l/* l2l.lua LICENSE
+	echo "#!`which carbon` -app" > l2l.app
+	cat l2l.zip >> l2l.app
+	chmod +x l2l.app
+	rm l2l.zip
 
 check:
 	luacheck --no-color --exclude-files compat.lua sample* \
